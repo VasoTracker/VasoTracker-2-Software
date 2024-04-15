@@ -2,13 +2,13 @@
 ======
 <img src="https://github.com/VasoTracker/VasoTracker-2/blob/main/vasotracker2.0/images/Small_Splash.gif" width="400" align="right">
 
-An open source pressure myograph system and diameter tracking software for assessing vascular reactivity.
+New and improved open source software and hardware for pressure myography with automatic pressure control, and general blood vessel diameter tracking software.
 
 Pressure myographs are used to assess blood vessel function. Both smooth muscle cell contraction and relaxation can be assayed using the pressure myograph.
 
-Commercial pressure myograph systems are expensive. Rather than buy one, we prefered to build our own, taking advantage of open-source technologies and cheap off-the-shelf components. 
+Commercial pressure myograph systems are expensive. Rather than buy one, we designed our own, taking advantage of open-source technologies and cheap off-the-shelf components. Then we improved it.
 
-If you want to build your own myograph system, or simply want to try our software with an existing system, give VasoTracker a try. Its cheap (well its free) and it works.
+If you want to build your own myograph system, or simply want to try our software with an existing system, give VasoTracker 2.0 a try. Its inexpensive - and it works.
 
 [Click here to see a list of papers citing the first VasoTracker version](https://scholar.google.com/scholar?cites=12876987194916375307&as_sdt=2005&sciodt=0,5&hl=en)
 
