@@ -30,10 +30,3 @@ If you want to build your own myograph system, or simply want to try our softwar
 
 **University of Michigan:**
 * Nathan R Tykocki
-
-### Previous Contributors (VasoTracker 1.0)
-
-**University of Durham:**
-* Penelope F Lawton
-* Christopher D Saunter
-* John G Girkin
