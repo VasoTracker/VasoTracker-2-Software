@@ -26,8 +26,8 @@ y_min2 = 25.0
 y_max2 = 200.0
 
 [memory]
-num_plot_points = 3000
-num_data_points = 15000
+num_plot_points = 500000
+num_data_points = 500000
 
 [pressure_control]
 default_pressure = 20.0

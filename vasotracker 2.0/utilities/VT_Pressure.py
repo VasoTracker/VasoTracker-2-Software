@@ -103,7 +103,7 @@ def is_pydaqmx_available():
     return pydaqmx_available
 
 
-pydaqmx_available = False
+#pydaqmx_available = False
 
 
 

@@ -53,7 +53,9 @@ try:
 except:
     micromanager_available = False
 
-is_pydaqmx_available = False
+is_pydaqmx_available = utilities.VT_Pressure.is_pydaqmx_available()#False
+
+print("Is PYDAQMX = ", is_pydaqmx_available)
 
 # Constants
 SYS32_PATH = "C:/WINDOWS/SYSTEM32/DRIVERs/"
@@ -1076,12 +1078,13 @@ class Model:
             graph.markers.y = marker_ordinates
 
             if have_autocaliper or have_multi_roi:
-
+                filter_diams=tb.analysis.filter.get()
                 def compute_masked_diams(diam_list, good_list):
                     masked_diams = []
                     for d, good in zip(diam_list[-max_pts:], good_list[-max_pts:]):
                         masked_d = d.copy()
-                        masked_d[~good] = np.nan
+                        if filter_diams:
+                            masked_d[~good] = np.nan
                         masked_diams.append(masked_d)
                     return masked_diams
 

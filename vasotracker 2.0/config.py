@@ -110,8 +110,8 @@ class GraphAxisSettings(Configurator):
 
 @dataclass
 class MemorySettings(Configurator):
-    num_plot_points: int = 3000
-    num_data_points: int = 15000
+    num_plot_points: int = 500000
+    num_data_points: int = 500000
 
     def set_values(self, state: "VtState"):
         state.measure.max_len = self.num_data_points
@@ -162,8 +162,6 @@ class PressureControlSettings(Configurator):
         p.pressure_stop.set(self.stop_pressure)
         p.pressure_intvl.set(self.pressure_interval)
         p.time_intvl.set(self.time_interval)
-        print("Start pressure: ", self.start_pressure)
-        print("What the hell")
         s = state.toolbar.servo
         p.set_pressure.set(self.default_pressure)
 

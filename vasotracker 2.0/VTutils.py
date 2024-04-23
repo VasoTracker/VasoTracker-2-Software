@@ -1,56 +1,3 @@
-##################################################
-## VasoTracker Pressure Myograph Software
-##
-## This software provides diameter measurements (inner and outer) of pressurised blood vessels
-## Designed to work with Thorlabs DCC1545M
-## For additional info see www.vasostracker.com and https://github.com/VasoTracker/VasoTracker
-##
-##################################################
-##
-## BSD 3-Clause License
-##
-## Copyright (c) 2018, VasoTracker
-## All rights reserved.
-##
-## Redistribution and use in source and binary forms, with or without
-## modification, are permitted provided that the following conditions are met:
-##
-## ## * Redistributions of source code must retain the above copyright notice, this
-##   list of conditions and the following disclaimer.
-##
-## * Redistributions in binary form must reproduce the above copyright notice,
-##   this list of conditions and the following disclaimer in the documentation
-##   and/or other materials provided with the distribution.
-##
-## * Neither the name of the copyright holder nor the names of its
-##   contributors may be used to endorse or promote products derived from
-##   this software without specific prior written permission.
-##
-## THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
-## AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
-## IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
-## DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
-## FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
-## DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
-## SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
-## CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
-## OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
-## OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-##
-##################################################
-##
-## Author: Penelope F Lawton, Matthew D Lee, and Calum Wilson
-## Copyright: Copyright 2018, VasoTracker
-## Credits: Penelope F Lawton, Matthew D Lee, and Calum Wilson
-## License: BSD 3-Clause License
-## Version: 1.4.0
-## Maintainer: Calum Wilson
-## Email: vasotracker@gmail.com
-## Status: Production
-## Last updated: 20201028
-##
-##################################################
-
 from dataclasses import dataclass
 from typing import List
 
@@ -344,85 +291,119 @@ def process_ddts(
         peaks = [ddt[indice] for indice in peaks_indices]
         try:
             # Get the value of the biggest nadir in the first half of the dataset
-            if detection_mode == 1:
+            if detection_mode == 0:
                 args = [
                     i
                     for i, idx in enumerate(valley_indices)
                     if idx > thresh and idx < len(ddts[0]) / 2
                 ]  # >170 to filter out tie #args = [i for i,idx in enumerate(valley_indices) if idx > thresh  and idx < (end_x)/2] # >170 to filter out tie
+
+                length_to_add = len(
+                    [i for i, idx in enumerate(valley_indices) if idx < thresh]
+                )  # Add this to correct for above filter
+                nadirs_firsthalf = [valleys[i] for i in args]
+                arg1 = np.argmax(np.absolute(nadirs_firsthalf))
+                arg1 = arg1 + length_to_add
+
+                OD1 = valley_indices[arg1]
+                OD1_ = valley_indices[arg1] + start_x[j]
+
+                # Get the value of the biggest peak in the second half of the dataset
+
+                args2 = [
+                    i
+                    for i, idx in enumerate(peaks_indices)
+                    if idx > OD1 + (len(ddts[0]) - OD1) / 10
+                ]  # if idx > (end_x)/2] #args2 = [i for i,idx in enumerate(peaks_indices) if idx > (end_x)/2]
+                peaks_2ndhalf = [peaks[i] for i in args2]
+                arg2 = np.argmax(np.absolute(peaks_2ndhalf))
+                arg3 = np.where(peaks == peaks_2ndhalf[arg2])[0][0]
+
+                OD2 = peaks_indices[arg3]
+                OD2_ = peaks_indices[arg3] + start_x[j]
+
             else:
+                # Inverted dataset logic
+                # Detecting the biggest peak (previously valley) in the first half of the dataset
                 args = [
                     i
-                    for i, idx in enumerate(valley_indices)
-                    if idx > thresh and idx < 3 * len(ddts[0]) / 4
+                    for i, idx in enumerate(peaks_indices)  # Changed from valley_indices to peaks_indices
+                    if idx > thresh and idx < len(ddts[0]) / 2
                 ]
+                
+                length_to_add = len(
+                    [i for i, idx in enumerate(peaks_indices) if idx < thresh]  # Changed from valley_indices to peaks_indices
+                )
+                peaks_firsthalf = [peaks[i] for i in args]
+                arg1 = np.argmax(np.absolute(peaks_firsthalf))
+                arg1 += length_to_add
 
-            length_to_add = len(
-                [i for i, idx in enumerate(valley_indices) if idx < thresh]
-            )  # Add this to correct for above filter
-            nadirs_firsthalf = [valleys[i] for i in args]
-            arg1 = np.argmax(np.absolute(nadirs_firsthalf))
-            arg1 = arg1 + length_to_add
+                OD1 = peaks_indices[arg1]  # Changed from valley_indices to peaks_indices
+                OD1_ = peaks_indices[arg1] + start_x[j]  # Changed from valley_indices to peaks_indices
 
-            OD1 = valley_indices[arg1]
-            OD1_ = valley_indices[arg1] + start_x[j]
+                # Detecting the biggest valley (previously peak) in the second half of the dataset
+                args2 = [
+                    i
+                    for i, idx in enumerate(valley_indices)  # Changed from peaks_indices to valley_indices
+                    if idx > OD1 + (len(ddts[0]) - OD1) / 10
+                ]
+                valleys_2ndhalf = [valleys[i] for i in args2]
+                arg2 = np.argmax(np.absolute(valleys_2ndhalf))
+                arg3 = np.where(valleys == valleys_2ndhalf[arg2])[0][0]
 
-            # Get the value of the biggest peak in the second half of the dataset
-
-            args2 = [
-                i
-                for i, idx in enumerate(peaks_indices)
-                if idx > OD1 + (len(ddts[0]) - OD1) / 10
-            ]  # if idx > (end_x)/2] #args2 = [i for i,idx in enumerate(peaks_indices) if idx > (end_x)/2]
-            peaks_2ndhalf = [peaks[i] for i in args2]
-            arg2 = np.argmax(np.absolute(peaks_2ndhalf))
-            arg3 = np.where(peaks == peaks_2ndhalf[arg2])[0][0]
-
-            OD2 = peaks_indices[arg3]
-            OD2_ = peaks_indices[arg3] + start_x[j]
+                OD2 = valley_indices[arg3]  # Changed from peaks_indices to valley_indices
+                OD2_ = valley_indices[arg3] + start_x[j]  # Changed from peaks_indices to valley_indices
 
         except:
             OD1_ = 0
             OD2_ = nx
 
+        # Inner diameter calculation
         try:
-            # The first inner diameter point is the first big (or the biggest) positive peak after the initial negative peak
-            # test = [item for item in peaks_indices if item > OD1_ and item < nx/2]
-            test = [
-                item
-                for item in peaks_indices
-                if item > OD1 and item < (OD1 + (OD2 - OD1) / 2)
-            ]  # nx/2]
+            if detection_mode == 0:
+                # The first inner diameter point is the first big (or the biggest) positive peak after the initial negative peak
+                # test = [item for item in peaks_indices if item > OD1_ and item < nx/2]
+                test = [
+                    item
+                    for item in peaks_indices
+                    if item > OD1 and item < (OD1 + (OD2 - OD1) / 2)
+                ]  # nx/2]
 
-            arg3 = 0  # This arg for the first!
-            ID1_ = test[arg3] + start_x[j]
-            """
+                arg3 = 0  # This arg for the first!
+                ID1_ = test[arg3] + start_x[j]
 
-            # Over writing this for the biggst peak
-            #print test
-            test3 = [ddt[item] for item in test]
-            #print test3
-            arg4 = np.argmax(np.absolute(test3)) # This arg for the biggest!
-            #print arg4
-            ID1_ = test[arg4]
-            #print "Inner Diameter 1 = ", ID1_
-            """
-            # The second inner diameter point is the last big negative peak before the big positive
-            # test2 = [item for item in valley_indices if item < OD2_ and item > nx/2]
-            test2 = [
-                item
-                for item in valley_indices
-                if item < OD2 and item > (OD1 - (OD2 - OD1) / 2)
-            ]  # nx/2]
-            ID2_ = test2[-1] + start_x[j]
-            # print "Inner Diameter 2 = ", ID2_
+                # The second inner diameter point is the last big negative peak before the big positive
+                # test2 = [item for item in valley_indices if item < OD2_ and item > nx/2]
+                test2 = [
+                    item
+                    for item in valley_indices
+                    if item < OD2 and item > (OD1 - (OD2 - OD1) / 2)
+                ]  # nx/2]
+                ID2_ = test2[-1] + start_x[j]
 
-            """
-            # Over writing this for the biggst peak
-            test4 = [ddt[item] for item in test2]
-            arg5 = np.argmax(np.absolute(test2))
-            ID2_ = test2[arg5]
-            """
+            else:
+                # Inverted data mode
+
+                # First inner diameter point (ID1_)
+                test = [
+                    item
+                    for item in valley_indices
+                    if item > OD1 and item < (OD1 + (OD2 - OD1) / 2)
+                ]
+
+                ID1_ = test[0] + start_x[j]  # First significant valley after OD1
+
+
+                # Second inner diameter point (ID2_)
+                test2 = [
+                    item
+                    for item in peaks_indices
+                    if item < OD2 and item > (OD1 + (OD2 - OD1) / 2)
+                ]
+
+                ID2_ = test2[-1] + start_x[j]  # Last significant peak before OD2
+
+
 
         except:
             ID1_ = 0
