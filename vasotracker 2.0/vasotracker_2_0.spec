@@ -4,7 +4,7 @@
 import sys
 sys.setrecursionlimit(sys.getrecursionlimit() * 5)
 
-added_files = [("images", "images"), ("SampleData", "SampleData"), ('settings.toml', '.')]
+added_files = [("images", "images"), ("SampleData", "SampleData"), ('settings.toml', '.'), ('MMConfig.cfg', '.'), ('Basler.cfg', '.')]
 
 a = Analysis(
     ['vasotracker_2_0.py'],

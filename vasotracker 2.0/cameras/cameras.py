@@ -10,6 +10,17 @@ import tkinter.messagebox as tmb
 import tifffile as tf
 import tkinter as tk
 from tkinter import filedialog
+import sys
+
+
+# The following is so that the required resources are included in the PyInstaller build.
+# Utility functions
+def get_resource_path(relative_path):
+    """Get the path to a resource, whether it's bundled with PyInstaller or not."""
+    base_path = getattr(sys, '_MEIPASS', os.path.abspath("."))
+    return os.path.join(base_path, relative_path)
+
+
 
 class Basler(CameraBase, camera_name="Basler"):
     device_label = "BaslerCamera"
@@ -19,8 +30,8 @@ class Basler(CameraBase, camera_name="Basler"):
     def __init__(self, mmc: CMMCorePlus, state, config):
         super().__init__(mmc, state, config)
 
-        # TODO(cmo): Add setDeviceAdapterSearchPaths
-        self.mmc.loadSystemConfiguration("Basler.cfg")
+        config_path = get_resource_path("Basler.cfg")
+        self.mmc.loadSystemConfiguration(config_path)
         #self.mmc.setConfig("FrameRate", "4Hz")
         exposure = state.toolbar.acq.exposure.get()
         self.set_exposure(exposure)
@@ -128,8 +139,10 @@ class MManagerCamera(CameraBase, camera_name="MMConfig"):
         super().__init__(mmc, state, config)
 
         config_loaded = False
+        config_path = get_resource_path("MMConfig.cfg")
         try:
-            self.mmc.loadSystemConfiguration("MMConfig.cfg")
+            print("CWD: ", os.getcwd())
+            self.mmc.loadSystemConfiguration(config_path)
             config_loaded = True
             print("bahahaha1")
         except:
@@ -146,24 +159,6 @@ class MManagerCamera(CameraBase, camera_name="MMConfig"):
             self.set_exposure(exposure)
 
         
-
-
-
-class Basler(CameraBase, camera_name="Basler"):
-    device_label = "BaslerCamera"
-    module_name = "BaslerPylon"
-    device_name = "BaslerCamera"
-
-    def __init__(self, mmc: CMMCorePlus, state, config):
-        super().__init__(mmc, state, config)
-
-        # TODO(cmo): Add setDeviceAdapterSearchPaths
-        self.mmc.loadSystemConfiguration("Basler.cfg")
-        #self.mmc.setConfig("FrameRate", "4Hz")
-        exposure = state.toolbar.acq.exposure.get()
-        self.set_exposure(exposure)
-
-
 
 '''
 class ProxyCamera(CameraBase, camera_name="SampleData"):
