@@ -57,13 +57,34 @@ class ThorlabsCS165MU(CameraBase, camera_name="CS165MU"):
     device_label = "TSICam"
     module_name = "TSI"
     device_name = "TSICam"
-
+    '''
     def __init__(self, mmc: CMMCorePlus, state, config):
         super().__init__(mmc, state, config)
 
         self.load_device()
         exposure = state.toolbar.acq.exposure.get()
         self.set_exposure(exposure)
+    '''
+    def __init__(self, mmc: CMMCorePlus, state, config):
+        super().__init__(mmc, state, config)
+
+        try:
+            self.load_device()
+            print(f"Device {self.device_label} loaded successfully.")
+        except Exception as e:
+            tmb.showinfo("Device Error", f"Failed to load the device {self.device_label}.")
+            print(f"Error: Failed to load device {self.device_label}: {str(e)}")
+            return  # Optionally return or handle the error further
+
+        try:
+            exposure = state.toolbar.acq.exposure.get()
+            self.set_exposure(exposure)
+            print("Exposure set successfully.")
+        except Exception as e:
+            tmb.showinfo("Exposure Error", "Failed to set exposure on the device.")
+            print(f"Error: Failed to set exposure: {str(e)}")
+            return  # Optionally return or handle the error further
+
 
     def get_image(self):
         high_bit_depth = super().get_image()
@@ -141,13 +162,19 @@ class MManagerCamera(CameraBase, camera_name="MMConfig"):
         config_loaded = False
         config_path = get_resource_path("MMConfig.cfg")
         try:
-            print("CWD: ", os.getcwd())
+            print(f"Current Working Directory: {os.getcwd()}")
+            print(f"Looking for file here: {config_path}")
             self.mmc.loadSystemConfiguration(config_path)
             config_loaded = True
-            print("bahahaha1")
-        except:
-            tmb.showinfo("Warning", "MMConfig.cfg not found in home directory!")
-        print("bahahaha")
+            print("Configuration loaded successfully.")
+        except FileNotFoundError:
+            tmb.showinfo("Configuration Error", f"MMConfig.cfg not found at {config_path}!")
+            print(f"Error: Configuration file not found at {config_path}.")
+        except Exception as e:
+            tmb.showinfo("Configuration Error", "An error occurred while loading the configuration.")
+            print(f"An unexpected error occurred: {str(e)}")
+        finally:
+            print("Configuration loading attempt completed.")
 
         
         if config_loaded:
@@ -158,7 +185,15 @@ class MManagerCamera(CameraBase, camera_name="MMConfig"):
             exposure = state.toolbar.acq.exposure.get()
             self.set_exposure(exposure)
 
-        
+
+    def get_image(self):
+        image = super().get_image()
+        if image.dtype == np.uint16:
+            # Convert 16-bit to 8-bit by scaling down
+            image = ((image / 65535) * 255).astype(np.uint8)
+        return image
+
+
 
 '''
 class ProxyCamera(CameraBase, camera_name="SampleData"):
