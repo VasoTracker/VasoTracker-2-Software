@@ -134,7 +134,7 @@ class OpenCvCamera(CameraBase, camera_name="OpenCV"):
     def set_resolution(self, width, height):
         self.mmc.setProperty('OpenCVgrabber', 'Resolution', f"{width}x{height}")
 '''
-        
+
 '''
 class JoyceCamera(CameraBase, camera_name="Joyce"):
     device_label = "OpenCVgrabber"
@@ -176,7 +176,7 @@ class MManagerCamera(CameraBase, camera_name="MMConfig"):
         finally:
             print("Configuration loading attempt completed.")
 
-        
+
         if config_loaded:
             camera = self.mmc.getLoadedDevicesOfType(2)
             self.device_label = camera
@@ -248,7 +248,7 @@ class ProxyCamera(CameraBase, camera_name="SampleData"):
         height, width = im.shape
         return width, height
 '''
-        
+
 
 class SavedDataCamera(CameraBase, camera_name="Image from file"):
     def __init__(self, mmc: CMMCorePlus, state, config):
@@ -260,6 +260,7 @@ class SavedDataCamera(CameraBase, camera_name="Image from file"):
         self.config.proxy_camera.max_frame = self.max_frame_count
         self.camera_stopped = False
         self.last_frame = None
+        self.last_frame_idx = None
 
     def reinitialize(self):
         self.frame_count = 0
@@ -272,8 +273,8 @@ class SavedDataCamera(CameraBase, camera_name="Image from file"):
             if self.last_frame is not None:
                 return self.last_frame
             else:
-                return np.zeros((1, 1)) 
-        
+                return np.zeros((1, 1))
+
         try:
             with tf.TiffFile(self.path_to_tiff) as tif:
                 if self.frame_count < len(tif.pages):
@@ -292,11 +293,17 @@ class SavedDataCamera(CameraBase, camera_name="Image from file"):
             if self.last_frame is not None:
                 return self.last_frame
             else:
-                return np.zeros((1, 1)) 
-            
+                return np.zeros((1, 1))
+
         if not isinstance(frame, int):
             return np.zeros((1, 1))  # Return a default blank image
 
+        if (
+            self.last_frame is not None
+            and self.last_frame_idx is not None
+            and self.last_frame_idx == frame
+        ):
+            return self.last_frame
 
         try:
             with tf.TiffFile(self.path_to_tiff) as tif:
@@ -305,11 +312,13 @@ class SavedDataCamera(CameraBase, camera_name="Image from file"):
                 else:
                     image = self.last_frame  # Return the last frame
                     self.camera_stopped = True
+                self.last_frame_idx = frame
+                self.last_frame = image
         except (FileNotFoundError, tf.TiffFileError):
             image = np.zeros((1, 1))
 
         #self.frame_count = (self.frame_count + 1) % self.max_frame_count
-        return image.astype(np.uint8)    
+        return image.astype(np.uint8)
 
 
     def get_num_frames(self):
@@ -325,7 +334,7 @@ class SavedDataCamera(CameraBase, camera_name="Image from file"):
         root.withdraw()  # Hide the main window
         file_path = filedialog.askopenfilename(title="Select Multi-frame TIFF File", filetypes=[("TIFF files", "*.tiff *.tif")])
         return file_path
-    
+
     def next_position(self, state):
         if state is True:
             self.frame_count += 1
@@ -362,4 +371,3 @@ class SavedDataCamera(CameraBase, camera_name="Image from file"):
         length = self.config.proxy_camera.max_frame
         print("Image shape: ", height, width, length)
         return width, height, length
-    

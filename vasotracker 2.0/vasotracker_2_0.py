@@ -88,7 +88,7 @@ images_folder = get_resource_path("images\\")
 sample_data_path = get_resource_path("SampleData\\")
 
 # TODOs and Future Improvements
-# TODO: 
+# TODO:
 
 
 @dataclass
@@ -269,6 +269,7 @@ class GraphState:
     id_lines: List[LineData] = field(
         default_factory=lambda: [LineData() for _ in range(NUM_LINES)]
     )
+    vertical_indicator: Optional[float] = None
     dirty: BooleanVar = field(default_factory=BooleanVar)
     clear: BooleanVar = field(default_factory=BooleanVar)
 
@@ -513,7 +514,7 @@ def rasterise_camera_state(
     diams: Optional[ImageDiameters] = None,
     filter_diams: bool = True,
     rotate_tracking: bool = True,
-    
+
 ) -> np.ndarray:
     # NOTE(cmo): Draw ROI
     result = np.copy(image)
@@ -911,7 +912,7 @@ class Model:
             if self.tracking:
                 self.start_time = current_time
                 self.frames_elapsed = 0
-        
+
         if self.executor is None:
             result = compute_diameters_and_rasterise(
                 im=im,
@@ -970,7 +971,7 @@ class Model:
                 f.future.add_done_callback(resolve_future)
 
     def complete_processing(self, result: DiamsAndRasterResult):
-        
+
         # Working here
         # This section should probably be in the processing part of model.
         if self.state.graph.clear.get():
@@ -978,7 +979,9 @@ class Model:
             #self.state.graph.clear()
             self.state.graph.clear.set(False)    # TODO: Add other measures here.
 
-        if self.tracking:
+        tb = self.state.toolbar
+        # NOTE(cmo): Condition added to show image when scrolling through image from file
+        if self.tracking or self.state.camera.camera_name == "Image from file":
             self.state.diameters = result.diameters
             # NOTE(cmo): Drop frames if the UI can't keep up
             if not self.state.cam_show.dirty.get():
@@ -986,12 +989,12 @@ class Model:
                 self.state.cam_show.im_data = result.rasterised
                 self.state.cam_show.dirty.set(True)
 
-                
+            if not self.tracking:
+                return
 
             current_time = result.frame_time
             time_elapsed = current_time - self.start_time
             self.time_elapsed = time_elapsed
-            
 
             if self.state.camera.camera_name == "Image from file":
                 self.frames_elapsed += 1
@@ -999,7 +1002,6 @@ class Model:
 
             diams = self.state.diameters
             #print("Length of diameter avg: ", len(diams.avg_outer_diam))
-            tb = self.state.toolbar
             record_data = self.state.toolbar.start_stop.record.get()
             rec_interval = self.state.toolbar.acq.rec_interval.get()
 
@@ -1018,7 +1020,7 @@ class Model:
                 self.state.cam_show.dirty.set(True)
 
         if diams is not None:
-            
+
             marker = 0
             if self.state.table.dirty_marker.get():
                 marker = 1
@@ -1109,14 +1111,14 @@ class Model:
                     graph.od_lines[i].y = sample_masked_diams(masked_ods, i)
                     graph.id_lines[i].x = new_x
                     graph.id_lines[i].y = sample_masked_diams(masked_ids, i)
-            
+
             # If image is from file, only update the graph on the last frame.
             if self.state.camera.camera_name == "Image from file":
-                last_frame = self.state.camera.max_frame_count 
+                last_frame = self.state.camera.max_frame_count
                 current_frame = self.state.camera.frame_count
                 if current_frame == last_frame -1:
                     graph.dirty.set(True)
-            else:                 
+            else:
                 graph.dirty.set(True)
 
         if diams is not None:
@@ -1137,7 +1139,7 @@ class Model:
                 outer_percentage = np.round((diams.avg_outer_diam / ref_diam) * 100, 2)
                 tb.data_acq.diam_percent.set(outer_percentage)
 
-        
+
 
     def initialize_tiff_writer1(self):
         print(self.output_path1)
@@ -1220,6 +1222,7 @@ class Model:
 
     def acq_thread(self):
         while self.run_acq_thread:
+            sleep_duration = self.sleep_duration
             if self.queue.empty() and self.acquiring:
                 camera = self.state.camera
                 if camera and camera.image_ready():
@@ -1228,12 +1231,12 @@ class Model:
                     # Logic: If not Offline Analyzer and if live camera buffer is empty, then do not try to get an image. Otherwise, get an image.
                     if not self.state.camera.camera_name == "Image from file":
                         if buffer < 1:
-                            time.sleep(self.sleep_duration)
+                            time.sleep(sleep_duration)
                             continue
                         else:
                             pass
                     else:
-                        pass    
+                        pass
                     try:
                         img = camera.get_image()
                     except:
@@ -1246,16 +1249,16 @@ class Model:
                     else:
                         camera.next_position()
                     # When loading in data, stop when we reach the end of the file
-                    
+
                     if self.state.camera.camera_name == "Image from file":
-                        last_frame = self.state.camera.max_frame_count 
+                        last_frame = self.state.camera.max_frame_count
                         current_frame = self.state.camera.frame_count
-                        
+
 
                         if current_frame == 1:
                             self.state.table.clear.set(True)
                             self.state.graph.clear.set(True)
-                        
+
                         if current_frame == last_frame:
                             self.state.app.acquiring.set(0)
                             self.state.app.tracking.set(0)
@@ -1280,12 +1283,14 @@ class Model:
                         # Can we get the slider value like we get the image?
                         img = camera.get_specific_frame(self.state.cam_show.slider_position_manual)
                         self.queue.put(img)
-                        
+                        # NOTE(cmo): Don't spin super fast on the same frame in this state!
+                        sleep_duration *= 10
+
                     else:
                         pass
 
-            time.sleep(self.sleep_duration)
-            
+            time.sleep(sleep_duration)
+
 
     def set_default_graph_lims(self):
         defaults = GraphAxisSettings()
@@ -1309,9 +1314,9 @@ class Model:
             self.state.camera.reset()
 
         if self.state.camera and cam_name == "Image from file":
-            self.state.camera.reset()         
+            self.state.camera.reset()
             self.mmc.unloadAllDevices()
-            self.mmc.reset()   
+            self.mmc.reset()
 
         try:
             self.state.camera = Camera(cam_name, self.mmc, self.state, self.config)
@@ -1550,7 +1555,7 @@ class Model:
 
         values = [
             self.current_table_row,  # Add row number
-            self.state.toolbar.data_acq.time_string.get(),#self.time_elapsed, 
+            self.state.toolbar.data_acq.time_string.get(),#self.time_elapsed,
             label,
             diams.avg_outer_diam,
             percentage,
@@ -1634,7 +1639,7 @@ class SourcePane(ToolbarPane):
             textvariable=sv.filename,
             width=15,
         )
-        
+
         ttk.Label(self, text="Settings:").grid(row=2, column=0, sticky=tk.E)
         self.settings_entry = make_entry(
             ttk.Entry,
@@ -1700,7 +1705,7 @@ class AcquisitionSettingsPane(ToolbarPane):
             row=1,
             column=1,
             disabled=True,
-        )        
+        )
 
         ttk.Label(self, text="Exp (ms):").grid(row=2, column=0, sticky=tk.E)
         self.exposure_entry = make_entry(
@@ -1763,7 +1768,7 @@ class AcquisitionSettingsPane(ToolbarPane):
             row=8,
             column=1,
         )
-        '''     
+        '''
 
         self.setup_default_settings_lock()
         self.setup_faster_settings_warning()
@@ -1954,7 +1959,7 @@ class GraphSettingsPane(ToolbarPane):
             row=1,
             column=1,
         )
-        
+
         self.x_max_entry = make_entry(
             ttk.Entry,
             textvariable=sv.x_max,
@@ -2029,7 +2034,7 @@ class CaliperROIPane(ToolbarPane):
 
         self.roi_button = ttk.Radiobutton(self, variable=sv.roi_flag, text="Rect", value='ROI')
         self.roi_button.grid(row=3, column=0, padx=2, pady=2, sticky=tk.EW)
-        
+
         self.caliper_button = ttk.Radiobutton(self, variable=sv.roi_flag, text="Line", value='Caliper')
         self.caliper_button.grid(row=3, column=1, padx=2, pady=2, sticky=tk.EW)
 
@@ -2086,9 +2091,9 @@ class PlottingPane(ToolbarPane):
                 button.config(relief=button_state)
             except:
                 pass
-        
 
-        
+
+
 
 
 class DataAcquisitionPane(ToolbarPane):
@@ -2336,7 +2341,7 @@ class PressureControlPane(ToolbarPane):
     def start_protocol_button_state_callback(self):
         running = self.model_vars.app.auto_pressure.get()
         if running:
-            self.start_protocol_button.configure(image=self.pressure_stop_img)  
+            self.start_protocol_button.configure(image=self.pressure_stop_img)
             self.set_pressure_button.configure(state=tk.DISABLED)
         else:
             self.start_protocol_button.configure(image=self.pressure_start_img)
@@ -2347,12 +2352,12 @@ class PressureControlPane(ToolbarPane):
         resized_image = img.resize((22, 22), Image.LANCZOS)
         tk_image = ImageTk.PhotoImage(resized_image)
         return tk_image
-    
+
     def resize_img2(self, img_path):
         img = Image.open(img_path)
         resized_image = img.resize((30, 30), Image.LANCZOS)
         tk_image = ImageTk.PhotoImage(resized_image)
-        return tk_image    
+        return tk_image
 
     def bind_tooltip_to_row_widgets(self, row, tooltip_instance, text):
         for child in self.winfo_children():
@@ -2367,7 +2372,7 @@ class PressureControlPane(ToolbarPane):
         pass
         #self.start_protocol_button.configure(state=state)
         #self.set_pressure_entry.configure(state=state)
-        #self.set_pressure_button.configure(state=state)       
+        #self.set_pressure_button.configure(state=state)
 
     def set_unlock_state(self, state=tk.NORMAL):
         pass
@@ -2385,15 +2390,15 @@ class PressureControlPane(ToolbarPane):
         self.model_vars.app.auto_pressure.set(not current_state)
         running  = self.model_vars.app.auto_pressure.set(not current_state)
         if running:
-            self.start_protocol_button.configure(image=self.pressure_stop_img) 
-            # Reset the variables here!!! 
+            self.start_protocol_button.configure(image=self.pressure_stop_img)
+            # Reset the variables here!!!
             try:
                 self.model.pressure_controller.reset_protocol()
             except:
                 pass
-        
+
         else:
-            self.start_protocol_button.configure(image=self.pressure_start_img)  
+            self.start_protocol_button.configure(image=self.pressure_start_img)
 
 # Specify a larger font
 large_font = ('Helvetica', 14)
@@ -2488,18 +2493,18 @@ class StartStopPane(ToolbarPane):
         self.camera_on_img = self.resize_img(os.path.join(images_folder, 'Camera_button_on.png'))
         self.camera_off_img = self.resize_img(os.path.join(images_folder, 'Camera_button_off.png'))
 
-        self.start_button = ttk.Button(self, image=self.camera_on_img)#, compound='top')#text="Snapshot", 
+        self.start_button = ttk.Button(self, image=self.camera_on_img)#, compound='top')#text="Snapshot",
         self.start_button.grid(row=0, column=0, pady=0)#, sticky="nsew")
 
         self.tracking_on_img = self.resize_img(os.path.join(images_folder, 'Tracking_button_on.png'))
         self.tracking_off_img = self.resize_img(os.path.join(images_folder, 'Tracking_button_off.png'))
 
-        self.track_button = ttk.Button(self, image=self.tracking_on_img)#, compound='top')#text="Snapshot", 
+        self.track_button = ttk.Button(self, image=self.tracking_on_img)#, compound='top')#text="Snapshot",
         self.track_button.grid(row=0, column=1, pady=0)#, sticky="nsew")
-        
+
         self.snapshot_image = self.resize_img(os.path.join(images_folder, 'Snapshot_Icon.png'))
 
-        self.snapshot_button = ttk.Button(self, image=self.snapshot_image)#, compound='top')#text="Snapshot", 
+        self.snapshot_button = ttk.Button(self, image=self.snapshot_image)#, compound='top')#text="Snapshot",
         self.snapshot_button.grid(row=0, column=2, pady=0)#, sticky="nsew")
 
         self.record_button = ttk.Checkbutton(self, variable=sv.record, text="Record Camera")
@@ -2527,16 +2532,16 @@ class StartStopPane(ToolbarPane):
     def start_button_state_callback(self):
         running = self.model_vars.app.acquiring.get()
         if running:
-            self.start_button.configure(image=self.camera_off_img)  
+            self.start_button.configure(image=self.camera_off_img)
         else:
-            self.start_button.configure(image=self.camera_on_img)  
+            self.start_button.configure(image=self.camera_on_img)
 
     def track_button_state_callback(self):
         tracking = self.model_vars.app.tracking.get()
         if tracking:
-            self.track_button.configure(image=self.tracking_off_img)  
+            self.track_button.configure(image=self.tracking_off_img)
         else:
-            self.track_button.configure(image=self.tracking_on_img)  
+            self.track_button.configure(image=self.tracking_on_img)
 
 
 class ToolbarView(ttk.Frame):
@@ -2569,7 +2574,7 @@ class ToolbarView(ttk.Frame):
             self.pressure_control_settings = PressureControlPane(self, state)
             self.panes.append(self.pressure_control_settings)
             self.pressure_control_settings.pack(side='left', fill='y')
-        
+
 
         self.start_stop = StartStopPane(self, state)
         self.panes.append(self.start_stop)
@@ -2653,8 +2658,8 @@ class Menus:
 
         if is_pydaqmx_available:
             self.settings_menu.add_separator()
-            self.settings_menu.add_command(label="DAQ Setup")        
-            self.settings_menu.add_command(label="Configure Pressure Protocol") 
+            self.settings_menu.add_command(label="DAQ Setup")
+            self.settings_menu.add_command(label="Configure Pressure Protocol")
 
         notepad_menu = tk.Menu(self.menu_bar, tearoff=0)
         self.notepad_menu = notepad_menu
@@ -2686,7 +2691,7 @@ import numpy as np  # Make sure you have numpy imported if you're using it
 class GraphFrame(ttk.Frame):
     def __init__(self, parent, state: VtState):
         super().__init__(parent)
-        
+
         self.parent = parent
         self.state_vars = state
 
@@ -2720,7 +2725,7 @@ class GraphFrame(ttk.Frame):
         # Create separate axes for markers
         self.ax1_markers = self.ax1.twinx()
         self.ax2_markers = self.ax2.twinx()
-              
+
         # Initialize empty plots for dynamic updating
         (self.od_avg,) = self.ax1.plot([], [], label='OD Avg')
         (self.id_avg,) = self.ax2.plot([], [], label='ID Avg')
@@ -2731,6 +2736,9 @@ class GraphFrame(ttk.Frame):
         # Assuming NUM_LINES is defined and represents the number of dynamic lines
         self.od_lines = [self.ax1.plot([], [])[0] for _ in range(NUM_LINES)]
         self.id_lines = [self.ax2.plot([], [])[0] for _ in range(NUM_LINES)]
+
+        self.ax1_vline = self.ax1.axvline(1, c='k')
+        self.ax2_vline = self.ax2.axvline(1, c='k')
 
         self.ax1.set_ylabel("Outer Diameter (OD)")
         self.ax2.set_xlabel("Time (s or frames)")
@@ -2811,7 +2819,7 @@ class GraphFrame(ttk.Frame):
             #    self.ax1_markers.add_line(line1)
             #    self.ax2_markers.add_line(line2)
             #
-                
+
             # Create Line2D objects for markers on both axes
             self.od_markers_line = Line2D([], [], color='red', marker='o', markersize=5, linewidth=1, label='Markers', linestyle='-')
             self.id_markers_line = Line2D([], [], color='red', marker='o', markersize=5, linewidth=1, label='Markers', linestyle='-')
@@ -2859,6 +2867,10 @@ class GraphFrame(ttk.Frame):
                     )
                     count += 1
 
+            if state.vertical_indicator is not None:
+                self.ax1_vline.set_xdata([state.vertical_indicator])
+                self.ax2_vline.set_xdata([state.vertical_indicator])
+
 
             self.figure.canvas.draw()
 
@@ -2902,7 +2914,7 @@ class GraphFrame(ttk.Frame):
             settings.dirty.set(False)
 
     def update_lims_fromfile_callback(self):
-        # Retrieve the current settings   
+        # Retrieve the current settings
         settings = self.state_vars.toolbar.graph
         if settings.limits_dirty.get():
             # Process outer diameter data
@@ -3153,7 +3165,13 @@ class CameraFrame(ttk.Frame):
         self.slider.config(state='normal')
         current_value = self.slider.get()
         self.state_vars.cam_show.slider_position_manual=current_value
-        
+        if self.state_vars.camera.camera_name == "Image from file" and not self.state_vars.app.tracking.get():
+            self.state_vars.graph.vertical_indicator = current_value - self.state_vars.camera.max_frame_count + 1
+        else:
+            self.state_vars.graph.vertical_indicator = None
+        self.state_vars.graph.dirty.set(True)
+        self.state_vars.cam_show.dirty.set(True)
+
     def updateValue(self, value):
         current_value = self.slider.get()
         current_value = int(value)
@@ -3171,11 +3189,10 @@ class CameraFrame(ttk.Frame):
 
     def update_slider(self, *args):
         #self.slider.config(state='normal')
-        l = self.state_vars.camera.frame_count 
+        l = self.state_vars.camera.frame_count
         self.slider.set(l)
         self.state_vars.cam_show.slider_position = l
         self.state_vars.cam_show.slider_dirty.set(False)
-
 
         #self.slider.config(state='disabled')
         #print("Slider is disabled")
@@ -3631,7 +3648,7 @@ class Controller:
             # Prompt user to register
             # On successful registration:
             splash = VasoTrackerSplashScreen(root, self.update_settings)
-            splash.splash_win.focus_force()    
+            splash.splash_win.focus_force()
 
         self.model.process_updates()
 
@@ -3699,7 +3716,7 @@ class Controller:
         tb = self.view.toolbar
 
         tb.acq.camera_entry.bind("<Configure>", lambda *args: self.set_camera())
-        
+
         '''
         tb.acq.res_entry.bind(
             "<Configure>", lambda *args: self.set_camera_resolution()
@@ -3720,8 +3737,8 @@ class Controller:
 
         # Multi caliper/roi buttons
         tb.caliper_roi.auto_add_button.config(command=self.caliper_auto_add)
-        tb.caliper_roi.auto_delete_button.config(command=self.caliper_auto_delete)        
-        tb.caliper_roi.auto_delete_all_button.config(command=self.caliper_auto_delete_all)        
+        tb.caliper_roi.auto_delete_button.config(command=self.caliper_auto_delete)
+        tb.caliper_roi.auto_delete_all_button.config(command=self.caliper_auto_delete_all)
 
         for i in range(NUM_LINES):
             tb.plotting.line_buttons[i].config(command=partial(self.toggle_line, i))
@@ -3738,7 +3755,7 @@ class Controller:
         tb.start_stop.snapshot_button.config(command=self.take_snapshot)
         self.view.table.add_button.config(command=self.add_table_row)
         self.view.table.ref_button.config(command=self.set_ref_diameter)
-        
+
         if is_pydaqmx_available:
             tb.pressure_control_settings.set_pressure_button.config(command=self.update_set_pressure)
             tb.pressure_control_settings.pressure_connect_button.config(command=self.open_pressure_settings)
@@ -3867,13 +3884,13 @@ class Controller:
 
     def caliper_manual_draw(self):
         self.camera_controller.mode = CameraInteractionMode.SetCaliper
-     
+
     def caliper_manual_delete(self):
-        try:    
+        try:
             self.model.delete_caliper()
         except:
             pass
-        
+
         try:
             self.model.delete_roi()
         except:
@@ -3928,19 +3945,19 @@ class Controller:
             pass
 
     def servo_start(self):
-        current_state = self.model.state.app.auto_pressure.get() 
+        current_state = self.model.state.app.auto_pressure.get()
         if current_state == 0:
             if tmb.askokcancel("Start Pressure Protocol", "Are you sure?"):
                 start_time = time.time()
                 self.model.state.toolbar.pressure_protocol.protocol_start_time.set(start_time)
                 self.model.state.toolbar.pressure_protocol.pressure_protocol_flag.set(1)
                 #self.view.toolbar.pressure_control_settings.toggle_protocol_button()
-                self.model.state.app.auto_pressure.set(not current_state) 
+                self.model.state.app.auto_pressure.set(not current_state)
         else:
             if tmb.askokcancel("Stop Pressure Protocol", "Are you sure?"):
                 self.model.state.toolbar.pressure_protocol.pressure_protocol_flag.set(0)
                 #self.view.toolbar.pressure_control_settings.toggle_protocol_button()
-                self.model.state.app.auto_pressure.set(not current_state) 
+                self.model.state.app.auto_pressure.set(not current_state)
                 self.model.pressure_controller.reset_protocol()
 
     def servo_stop(self):
@@ -3948,7 +3965,7 @@ class Controller:
 
     def decrease_pressure(self):
         increment = self.model.state.toolbar.pressure_protocol.pressure_increment.get()
-        current_pressure = self.model.state.toolbar.pressure_protocol.set_pressure.get() 
+        current_pressure = self.model.state.toolbar.pressure_protocol.set_pressure.get()
         new_pressure = current_pressure - increment
         if new_pressure < 0:
             new_pressure = 0
@@ -3956,7 +3973,7 @@ class Controller:
 
     def increase_pressure(self):
         increment = self.model.state.toolbar.pressure_protocol.pressure_increment.get()
-        current_pressure = self.model.state.toolbar.pressure_protocol.set_pressure.get() 
+        current_pressure = self.model.state.toolbar.pressure_protocol.set_pressure.get()
         new_pressure = current_pressure + increment
         if new_pressure > 200:
             new_pressure = 200
@@ -3970,10 +3987,10 @@ class Controller:
                 message="You need to select your camera to show images!",
             )
         else:
-            self.model.state.app.acquiring.set(not current_state) 
-        current_state = self.model.state.app.acquiring.get() 
+            self.model.state.app.acquiring.set(not current_state)
+        current_state = self.model.state.app.acquiring.get()
         if current_state == 0:
-            self.model.state.app.tracking.set(current_state)  
+            self.model.state.app.tracking.set(current_state)
 
 
     def start_tracking(self):
@@ -3989,19 +4006,19 @@ class Controller:
                 tmb.showwarning(
                     title="Warning",
                     message="You need to set up an output file (File -> New File).",
-                )   
+                )
             else:
                 current_state = self.model.state.app.acquiring.get()
 
                 if current_state == 0:
-                    self.model.state.app.acquiring.set(not current_state)   
+                    self.model.state.app.acquiring.set(not current_state)
                     current_time = time.time()
-                    self.model.start_time = current_time      
+                    self.model.start_time = current_time
                 current_state = self.model.state.app.tracking.get()
-                self.model.state.app.tracking.set(not current_state) 
+                self.model.state.app.tracking.set(not current_state)
 
     def start_tracking_file(self):
-        self.model.state.app.tracking_file.set(True) 
+        self.model.state.app.tracking_file.set(True)
 
 
 
@@ -4009,8 +4026,8 @@ class Controller:
         im_data = self.model.state.cam_show.im_data
         if im_data is not None:
             self.model.save_snapshot(im_data, subdir=None)
-     
-            
+
+
 
     def open_browser_kofi(self):
         webbrowser.open_new(r"https://ko-fi.com/vasotracker")
@@ -4024,7 +4041,7 @@ class Controller:
 
     def update_set_pressure(self):
 
-            
+
         new_pressure_value = self.model.state.toolbar.pressure_protocol.set_pressure.get()
         self.pressure_controller.adjust_pressure(new_pressure_value, update_table=True)
 
@@ -4049,14 +4066,14 @@ class Controller:
             self.start_tracking()
             self.start_tracking_file()
             self.model.state.cam_show.slider_change_state.set(True)
-            
 
-    def setup_files(self):   
+
+    def setup_files(self):
         if self.output_path:
-            self.model.setup_output_files(output_path=self.output_path) 
+            self.model.setup_output_files(output_path=self.output_path)
             self.model.state.table.clear.set(True)
             self.model.state.graph.clear.set(True)
-                
+
 
     def menu_new_file(self):
         if tmb.askokcancel("New experiment...", "Are you sure?"):
@@ -4066,7 +4083,7 @@ class Controller:
             self.output_path = None
             self.output_path = self.get_output_filename()
             if self.output_path:
-                self.model.setup_output_files(output_path=self.output_path) 
+                self.model.setup_output_files(output_path=self.output_path)
 
                 self.model.state.table.clear.set(True)
                 self.model.state.graph.clear.set(True)
@@ -4264,7 +4281,7 @@ class Controller:
 
         # Create a placeholder frame for PlottingFrame using grid()
         frame = tk.Frame(popup)
-        frame.pack()     
+        frame.pack()
 
         # Create an instance of the DAAQ Setings within the frame
         self.menu_plotting_pane = ServoSettingsPane(frame, self.model.state)
@@ -4286,7 +4303,7 @@ class Controller:
 
         # Create a placeholder frame for PlottingFrame using grid()
         frame = tk.Frame(popup)
-        frame.pack()     
+        frame.pack()
 
         # Create an instance of the DAAQ Setings within the frame
         self.menu_plotting_pane = PressureProtocolPane(frame, self.model.state)
@@ -4390,7 +4407,7 @@ if __name__ == "__main__":
 
     if not is_pydaqmx_available:
         tmb.showinfo("Warning", "niDAQmx not found. Please install to enable hardware control.")
-        
+
 
 
     # Get the default font
