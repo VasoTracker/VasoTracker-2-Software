@@ -273,8 +273,8 @@ class SavedDataCamera(CameraBase, camera_name="Image from file"):
             if self.last_frame is not None:
                 return self.last_frame
             else:
-                return np.zeros((1, 1))
-
+                return np.zeros((1, 1)) 
+        
         try:
             with tf.TiffFile(self.path_to_tiff) as tif:
                 if self.frame_count < len(tif.pages):
@@ -285,25 +285,24 @@ class SavedDataCamera(CameraBase, camera_name="Image from file"):
         except (FileNotFoundError, tf.TiffFileError):
             image = np.zeros((1, 1))
 
+        # Check if the image is 16-bit, and convert to 8-bit if true
+        if image.dtype == np.uint16:
+            # Convert 16-bit to 8-bit by scaling down
+            image = ((image / 65535) * 255).astype(np.uint8)
+
         #self.frame_count = (self.frame_count + 1) % self.max_frame_count
-        return image.astype(np.uint8)
+        return image.astype(np.uint8) 
 
     def get_specific_frame(self, frame):
         if self.camera_stopped:
             if self.last_frame is not None:
                 return self.last_frame
             else:
-                return np.zeros((1, 1))
-
+                return np.zeros((1, 1)) 
+            
         if not isinstance(frame, int):
             return np.zeros((1, 1))  # Return a default blank image
 
-        if (
-            self.last_frame is not None
-            and self.last_frame_idx is not None
-            and self.last_frame_idx == frame
-        ):
-            return self.last_frame
 
         try:
             with tf.TiffFile(self.path_to_tiff) as tif:
@@ -312,13 +311,16 @@ class SavedDataCamera(CameraBase, camera_name="Image from file"):
                 else:
                     image = self.last_frame  # Return the last frame
                     self.camera_stopped = True
-                self.last_frame_idx = frame
-                self.last_frame = image
         except (FileNotFoundError, tf.TiffFileError):
             image = np.zeros((1, 1))
 
+        # Check if the image is 16-bit, and convert to 8-bit if true
+        if image.dtype == np.uint16:
+            # Convert 16-bit to 8-bit by scaling down
+            image = ((image / 65535) * 255).astype(np.uint8)
+
         #self.frame_count = (self.frame_count + 1) % self.max_frame_count
-        return image.astype(np.uint8)
+        return image.astype(np.uint8)    
 
 
     def get_num_frames(self):

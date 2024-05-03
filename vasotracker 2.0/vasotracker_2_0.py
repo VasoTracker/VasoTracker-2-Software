@@ -3032,14 +3032,14 @@ class TableFrame(ttk.Frame):
             row=0, column=0, columnspan=5, sticky=tk.N + tk.S + tk.E + tk.W
         )
         #ttk.Label(table_controls, text="Label:").grid(row=0, column=0)
-        self.label_entry = ttk.Entry(table_controls, width=30, textvariable=sv.label)
+        self.label_entry = ttk.Entry(table_controls, width=20, textvariable=sv.label)
         self.label_entry.grid(row=0, column=1)
         self.add_button = ttk.Button(table_controls, text="Add")
         self.add_button.grid(row=0, column=2)
 
 
 
-        ttk.Label(table_controls, text="Reference Diameter:").grid(
+        ttk.Label(table_controls, text="Ref Diameter:").grid(
             row=0, column=4, padx=(20, 0)
         )
         self.ref_diam_entry = ttk.Entry(
