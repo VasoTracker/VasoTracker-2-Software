@@ -28,5 +28,5 @@ If you want to build your own myograph system, or simply want to try our softwar
 **University of Glasgow:**
 * Christopher Osborne
 
-**University of Michigan:**
+**Michigan State University:**
 * Nathan R Tykocki
