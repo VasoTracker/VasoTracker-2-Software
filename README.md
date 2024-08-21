@@ -30,3 +30,6 @@ If you want to build your own myograph system, or simply want to try our softwar
 
 **University of Michigan:**
 * Nathan R Tykocki
+
+**University of Vermont:**
+* Osama Harraz
