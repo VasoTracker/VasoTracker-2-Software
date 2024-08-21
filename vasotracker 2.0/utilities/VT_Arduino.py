@@ -239,12 +239,16 @@ class Arduino:
 
     def sendData(self, pressure):
         print(pressure)
-        msg = str(pressure) + "\n"
+        msg = f"<{pressure}>"  # Do we need the newline?
 
         #print("message = ", msg)
-        x = msg.encode("ascii")  # encode n send
+        x = msg.encode("ascii")
         for i, GLOBAL_PORT in enumerate(self.PORTS):
             GLOBAL_PORT.flushInput()
-            GLOBAL_PORT.flushOutput()
+            GLOBAL_PORT.flushOutput() 
 
-            GLOBAL_PORT.write(x)
+            try:
+                GLOBAL_PORT.write(x)  # Send the encoded message
+            except Exception as e:
+                print(f"Error sending data: {e}")
+
