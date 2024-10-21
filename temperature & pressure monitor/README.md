@@ -1,35 +1,29 @@
-VasoTracker Temperature Controller
+VasoTracker Temperature Sensor
 ======
 <img src="https://github.com/kaelome/VasoTracker/blob/master/Splash.gif" width="400" align="right">
 
-An Arduino-based temperature controller for the VasoTracker myograph system.
+An Arduino-based temperature sensor for the VasoTracker myograph system.
 
 ## Features
 
 * **Reads and displays temperature sensed by an 10k NTC thermistor**
 
-* **Implements bang-bang control of heating elements mounted on the VasoTracker Vessel Chamber**
-
-* **Writes data to serial port for acquisition and display by the VasoTracker GUI**
+* **Writes data to serial port for acquisition and display by the VasoTracker 2.0 GUI**
 
 ## Required components:
 
-The VasoTracker Temperature Controller (with temperature sensor and two heating elements) can be built for ~£75. Here is a table of the components required:
+The VasoTracker Temperature Sensor can be built for ~£75. Here is a table of the components required:
 
 **Parts**|**Supplier**|**Part #**|**Qty**|**£/unit**|**Total (£)**
 :-----:|:-----:|:-----:|:-----:|:-----:|:-----:
-Arduino Uno|Arduino|A000066 |1|20.7|20.7
-12V power supply|RS|903-7048|1|12.68|12.68
-Arduino Proto Shield |Arduino|A000077|1|10|10
-LCD Shield|iTead Studio|1602 LCD|1|3.98|3.98
-10k NTC Thermistor|Adafruit|372|1|3.03|3.03
-Kool-Pak 0.2Ω Thick Film (Heating) Resistor|Caddock|MP825.20.0-1%|2|6.89|13.78
-NPN MOSFET|Infineon Technologies|IRL540NPBF|1|0.99|0.99
-Resistor kit|Velleman-kit|RES-E12|1|4.7|4.7
-Jumper wire kit|RobotShop|RB-Cix-02|1|3.77|3.77
-2-pin Screw Terminal|RobotShop|RB-Dfr-465|3|0.6|1.8
-Arduino R3 Stackable Headers|Sparkfun Electronics|PRT-10007|1|1.14|1.14
-LEGO™ Encolsure|LEGO|-|-|-|-
+[Arduino Uno]()|Arduino|A000066 |1|20.7|20.7
+[12V power supply]()|RS|903-7048|1|12.68|12.68
+[Arduino Proto Shield]()|Arduino|A000077|1|10|10
+[LCD Shield]()|iTead Studio|1602 LCD|1|3.98|3.98
+[10k NTC Thermistor]()|Adafruit|372|1|3.03|3.03
+[Resistor kit]()|Velleman-kit|RES-E12|1|4.7|4.7
+[Jumper wire kit]()|RobotShop|RB-Cix-02|1|3.77|3.77
+[2-pin Screw Terminal]()|RobotShop|RB-Dfr-465|3|0.6|1.8
  | | | |**Subtotal**|**76.57**
 
 
