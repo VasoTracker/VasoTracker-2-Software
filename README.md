@@ -1,6 +1,6 @@
 # VasoTracker 2.0
 ======
-<img src="https://github.com/VasoTracker/VasoTracker-2/blob/main/VasoTracker-2/temperature & pressure monitor/Images/Pressure-Temp Sensor.png" width="400" align="right">
+<img src="https://github.com/VasoTracker/VasoTracker-2/blob/main/vasotracker2.0/images/Small_Splash.gif" width="400" align="right">
 
 New and improved open source software and hardware for pressure myography with automatic pressure control, and general blood vessel diameter tracking software.
 
