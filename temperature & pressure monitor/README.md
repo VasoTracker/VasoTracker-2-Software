@@ -1,8 +1,8 @@
 VasoTracker Temperature Sensor
 ======
-<img src="https://github.com/kaelome/VasoTracker/blob/master/Splash.gif" width="400" align="right">
+<img src="https://github.com/VasoTracker/VasoTracker/blob/master/Splash.gif" width="400" align="right">
 
-An Arduino-based temperature sensor for the VasoTracker myograph system.
+An Arduino-based pressure and temperature sensor for the VasoTracker myograph system.
 
 ## Features
 
