@@ -1,6 +1,6 @@
 # VasoTracker 2.0
 ======
-<img src="https://github.com/VasoTracker/VasoTracker-2/blob/main/vasotracker2.0/images/Small_Splash.gif" width="400" align="right">
+<img src="https://github.com/VasoTracker/VasoTracker-2/blob/main/VasoTracker-2/temperature & pressure monitor/Images/Pressure-Temp Sensor.png" width="400" align="right">
 
 New and improved open source software and hardware for pressure myography with automatic pressure control, and general blood vessel diameter tracking software.
 
@@ -28,13 +28,9 @@ If you want to build your own myograph system, or simply want to try our softwar
 **University of Glasgow:**
 * Christopher Osborne
 
-<<<<<<< HEAD
-**University of Michigan:**
-* Nathan R Tykocki
 
 **University of Vermont:**
 * Osama Harraz
-=======
+
 **Michigan State University:**
 * Nathan R Tykocki
->>>>>>> f8f81965fa1ebba86f9afbe936abee4a66e594ed
