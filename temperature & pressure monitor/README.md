@@ -4,6 +4,11 @@
 
 The **VasoTracker Temperature & Pressure Monitor** is an Arduino-based system designed for use with the VasoTracker myograph or any other setup that requires precise temperature and pressure monitoring. This modular device is easy to assemble and provides real-time data acquisition for experiments.
 
+## Table of Contents
+- [Key Features](#key-features-of-vasotracker-20)
+- [Build & Operation Guide](#build--operation-guide)
+- [Cost-Saving Tip](#cost-saving-tip)
+
 ## Key Features
 
 - **Temperature Monitoring:** Accurately reads and displays temperature using a 10k NTC thermistor.
