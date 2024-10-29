@@ -1,6 +1,6 @@
 # VasoTracker 2.0
 
-![VasoTracker 2.0](https://github.com/VasoTracker/VasoTracker-2/blob/main/myograph%20bath%202.0/Images/Vasotracker%202%20Myograph.jpg){: width="400" align="right"}
+<img src="https://github.com/VasoTracker/VasoTracker-2/blob/main/myograph%20bath%202.0/Images/Vasotracker%202%20Myograph.jpg" width="400" align="right">
 
 **VasoTracker 2.0** is a cost-effective, open-source system designed for measuring and tracking the diameter of isolated, pressurized blood vessels. As an accessible alternative to commercial pressure myograph systems, it costs approximately £13,500—about 25% of the price of typical commercial options.
 
