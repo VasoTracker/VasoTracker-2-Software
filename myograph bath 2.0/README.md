@@ -23,7 +23,7 @@ We recommend that the custom parts are manufactured in POM-C material by commerc
 
 The monitor is constructed using readily available Arduino components. At the time of release, the total cost of the components is approximately **£315.66**, with pressure transducers accounting for a significant portion of the expense.
 
-For a detailed list of components, step-by-step build instructions, and operational guidelines, please refer to the [**Temperature & Pressure Monitor User Manual**](https://github.com/VasoTracker/VasoTracker-2/blob/main/temperature%20%26%20pressure%20monitor/VasoTracker%202%20Temperature%20%26%20Pressure%20Monitor%20Manual.pdf).
+For a detailed list of components, step-by-step build instructions, and operational guidelines, please refer to the [**Bath Chamber User Manual**](https://github.com/VasoTracker/VasoTracker-2/blob/main/myograph%20bath%202.0/VasoTracker%202%20Bath%20Chamber%20Manual.pdf).
 
 ## Cost-Saving Tip
 
