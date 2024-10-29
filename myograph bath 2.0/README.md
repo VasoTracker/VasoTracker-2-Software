@@ -1,6 +1,6 @@
 # VasoTracker 2.0 Pressure Myograph Chamber
 
-<img src="https://github.com/VasoTracker/VasoTracker-2/blob/main/temperature%20%26%20pressure%20monitor/Images/Pressure-Temp%20Sensor.jpg" width="400" align="right">
+<img src="https://github.com/VasoTracker/VasoTracker-2/blob/main/myograph%20bath%202.0/Images/Vasotracker%202%20Myograph.jpg" width="400" align="right">
 
 The **VasoTracker 2.0 Pressure Myograph Chamber** is a multi-purpose design, and is ideal for experiments requiring blood vessel diameter measurement. The chamber was designed to sit on a standard microscope stage, but the baseplate was designed for compatibility with [Thorlabs motorized scanning stages](https://www.thorlabs.com/newgrouppage9.cfm?objectgroup_id=5360). Angled cannula holders allow vessels to be positioned near the coverglass at the bottom of the chamber for inverted confocal use, and also provide enough clearance to enable confocal imaging with large-diameter CFI60 on upright microscopes. 
 
