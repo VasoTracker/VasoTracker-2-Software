@@ -6,6 +6,8 @@
 
 Whether you’re new to vascular research or looking to optimize your lab's setup, VasoTracker 2.0 offers a modular and customizable solution for assessing blood vessel function.
 
+For full details: see https://vasotracker.com/
+
 ## Table of Contents
 
 - [Publications](#publications)
@@ -24,16 +26,16 @@ Whether you’re new to vascular research or looking to optimize your lab's setu
 **Approximate Build Cost: £3,320**
 
 - **Bath Chamber (~£2,500)**  
-  [Pressure Myograph](https://vasotracker.com/pressure-myograph/)
+  [Pressure Myograph](https://github.com/VasoTracker/VasoTracker-2/tree/main/myograph%20bath%202.0)
   
 - **Temperature & Pressure Monitor (~£320)**  
-  [Temperature & Pressure Sensor](https://vasotracker.com/temperature-pressure-sensor/)
+  [Temperature & Pressure Sensor](https://github.com/VasoTracker/VasoTracker-2/tree/main/temperature%20%26%20pressure%20monitor)
   
 - **VasoMoto Pressure Control System (~£500)**  
-  [VasoMoto System](https://vasotracker.com/vasomoto/)
+  [VasoMoto System](https://github.com/DrN8PhD/VasoMoto)
   
 - **VasoTracker Software (Free)**  
-  [VasoTracker Software](https://vasotracker.com/software/)
+  [VasoTracker Software](https://github.com/VasoTracker/VasoTracker-2/tree/main/vasotracker%202.0)
 
 For details, refer to the [**VasoTracker 2.0 System Guide**](https://github.com/VasoTracker/VasoTracker-2/blob/main/VasoTracker%202%20System%20Guide.pdf).
 
