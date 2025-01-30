@@ -67,3 +67,9 @@ To fully set up a VasoTracker-based pressure myography system, the following com
 
 **Michigan State University:**
 - Nathan R Tykocki
+
+## License
+
+Distributed under the terms of the [BSD-3-Clause] license,
+
+VasoTracker is free and open source software/hardware.
