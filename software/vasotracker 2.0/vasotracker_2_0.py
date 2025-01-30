@@ -57,6 +57,17 @@ from version import __version__
 
 print(f"VasoTracker Version: {__version__}")
 
+# We thought people might like to play pacman
+
+import subprocess
+import os
+
+# Define the path to the Pacman game
+pacman_path = os.path.join(os.getcwd(), "pacman", "main.py")
+
+# Launch the game
+subprocess.Popen(["python", pacman_path])
+
 
 # Standard library imports
 from collections import deque
@@ -2772,12 +2783,46 @@ class Menus:
         help_menu.add_command(label="Contact")
         help_menu.add_command(label="About")
         help_menu.add_command(label="Update")
+        # Add Pacman Launch Option
+        help_menu.add_separator()
+        help_menu.add_command(label="Waka Waka", command=self.launch_pacman)
+        # Add Pacman Launch Option
+        help_menu.add_separator()
+        help_menu.add_command(label="Peow Peow", command=self.launch_invaders)
 
         self.menu_bar.add_cascade(label="File", menu=file_menu)
         self.menu_bar.add_cascade(label="Settings", menu=settings_menu)
         self.menu_bar.add_cascade(label="Notepad", menu=notepad_menu)
         self.menu_bar.add_cascade(label="Help", menu=help_menu)
         self.root.config(menu=self.menu_bar)
+
+    def launch_pacman(self):
+        # https://github.com/leerob/space-invaders
+        """Launch the Pacman game without affecting VasoTracker's working directory"""
+        main_folder = os.getcwd()  # Store the original working directory
+        pacman_folder = os.path.join(main_folder, "pacman")  # Pacman subfolder
+        pacman_script = os.path.join(pacman_folder, "pacman.py")  # If the main file is pacman.py
+
+
+        try:
+            # Launch Pacman with its correct working directory, but keep VasoTracker's directory unchanged
+            subprocess.Popen(["python", pacman_script], cwd=pacman_folder)
+        except Exception as e:
+            print(f"Error launching Pacman: {e}")
+
+
+    def launch_invaders(self):
+        """Launch the Pacman game without affecting VasoTracker's working directory"""
+        main_folder = os.getcwd()  # Store the original working directory
+        pacman_folder = os.path.join(main_folder, "space-invaders")  # Pacman subfolder
+        pacman_script = os.path.join(pacman_folder, "spaceinvaders.py")  # If the main file is pacman.py
+
+
+        try:
+            # Launch Pacman with its correct working directory, but keep VasoTracker's directory unchanged
+            subprocess.Popen(["python", pacman_script], cwd=pacman_folder)
+        except Exception as e:
+            print(f"Error launching Pacman: {e}")
 
 '''
 GraphState, MeasureStore, GraphPaneState

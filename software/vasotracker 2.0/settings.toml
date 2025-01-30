@@ -44,5 +44,5 @@ path_template = "\\SampleData\\TEST{:04d}.tif"
 max_frame = 300
 
 [registration]
-register_flag = 1
-neveragain_flag = 0
+register_flag = 0
+neveragain_flag = 1
