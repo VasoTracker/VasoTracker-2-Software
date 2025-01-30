@@ -114,4 +114,4 @@ If you encounter any problems, please [file an issue] along with a detailed desc
 Sometimes, a little bit of Pac-Man or Space Invaders is required. We included these games courtesy of the people
 
    - [Whoever created PacManCode](https://pacmancode.com/)
-   - [FLee Rob on GitHub](https://github.com/leerob/space-invaders)
+   - [Lee Rob on GitHub](https://github.com/leerob/space-invaders)
