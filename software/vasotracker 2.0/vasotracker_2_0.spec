@@ -4,6 +4,17 @@
 import sys
 sys.setrecursionlimit(sys.getrecursionlimit() * 5)
 
+import os
+import sys
+
+# Ensure the current directory of the spec file is the working directory
+spec_dir = os.path.dirname(os.path.abspath(sys.argv[0]))
+sys.path.insert(0, spec_dir)
+
+
+import version
+from version import __version__
+
 added_files = [("images", "images"), ("SampleData", "SampleData"), ('settings.toml', '.'), ('MMConfig.cfg', '.'), ('Basler.cfg', '.')]
 
 a = Analysis(
@@ -25,7 +36,7 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name=f"vasotracker 2.0",
+    name=f"vasotracker_{__version__}",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -46,5 +57,5 @@ coll = COLLECT(
     strip=False,
     upx=True,
     upx_exclude=[],
-    name=f"vasotracker 2.0",
+    name=f"vasotracker_{__version__}",
 )

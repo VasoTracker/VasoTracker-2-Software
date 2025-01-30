@@ -57,3 +57,5 @@ lib64/
 .pdf
 SampleData/
 Old/
+pacman/
+space-invaders/
