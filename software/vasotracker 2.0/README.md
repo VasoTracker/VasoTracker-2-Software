@@ -108,3 +108,10 @@ If you encounter any problems, please [file an issue] along with a detailed desc
 
 [μManager 2.0]: https://micro-manager.org/
 [The 3-Clause BSD License]: http://opensource.org/licenses/BSD-3-Clause
+
+#### Added Fund
+
+Sometimes, a little bit of Pac-Man or Space Invaders is required. We included these games courtesy of the people
+
+   - [Whoever created PacManCode](https://pacmancode.com/)
+   - [FLee Rob on GitHub](https://github.com/leerob/space-invaders)
