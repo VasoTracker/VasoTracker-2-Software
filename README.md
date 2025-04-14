@@ -2,6 +2,10 @@
 
 The VasoTracker 2.0 software is a comprehensive software solution designed for the acquisition and analysis of imaging data from blood vessels mounted in a pressure myograph. It supports both live and pre-recorded video analysis, making it adaptable for various experimental set ups.
 
+![til](https://github.com/VasoTracker/VasoTracker-2-Software/blob/main/VasoTracker%20GUI.gif)
+
+
+
 ## Table of Contents
 - [Key Features](#key-features-of-vasotracker-20)
 - [Installation Instructions](#vasotracker-installation-instructions)
