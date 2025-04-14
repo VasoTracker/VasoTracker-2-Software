@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING, Dict, Optional
 import numpy as np
 from skimage import measure
 from .VTutils import diff2, process_ddts
+from scipy.signal import medfilt
 
 if TYPE_CHECKING:
     from vt_mvc import Roi, Caliper, RasterDrawState
@@ -101,14 +102,17 @@ def calculate_diameter(
     thresh_factor: float,
     filter_means: bool,
     rotate_tracking: bool,
+    ultrasound_tracking: bool,
 ) -> Optional[ImageDiameters]:
      # Rotate the image by 90 degrees if rotate_tracking is True
+
     if rotate_tracking:
         image = np.rot90(image)  # This rotates the image 90 degrees counterclockwise
-        ny, nx = image.shape  # Update the dimensions after rotation
+        nx, ny = image.shape  # Update the dimensions after rotation
+
     else:
         ny, nx = image.shape
-        
+    
     roi = rds.roi
     autocaliper = rds.autocaliper
     multi_roi = rds.multi_roi
@@ -116,45 +120,75 @@ def calculate_diameter(
     y_pos = []
     have_autocalipers = len(autocaliper) > 0
     single_roi = len(multi_roi) == 0
+
+
     if not have_autocalipers and single_roi:
         if roi is None:
-            start_x, start_y, end_x, end_y = 0, 0, nx, ny
-            # no roi, i.e., whole image:
-            num_lines = num_lines  # Replace with the desired number of segments
-            total_height = end_y - start_y
-            diff = int(total_height / (num_lines + 1))
-            start = int(start_y + diff)
-            end = end_y - diff
-
+            if rotate_tracking:
+                # Transform full image selection to match rotated analysis space
+                start_x, start_y, end_x, end_y = 0, 0, ny, nx  # Swap width/height
+            else:
+                start_x, start_y, end_x, end_y = 0, 0, nx, ny  # No rotation needed
+            
         else:
             start_x, start_y, end_x, end_y = roi.fixed_corners()
-            ny = end_y - start_y
-            num_lines = num_lines  # Replace with the desired number of segments
-            total_height = ny
-            space_between_lines = total_height / (num_lines + 1)
-            start = int(start_y + space_between_lines)
-            diff = int(total_height / (num_lines + 1))
-            end = int(end_y - space_between_lines)
+
+            if rotate_tracking:
+                # The user drew the ROI on the original image, but we analyze the rotated image
+                # Transform ROI coordinates while ensuring they remain within bounds
+                start_x_new = start_y
+                start_y_new = nx - end_x  # Use nx instead of ny to ensure correct bounds
+                end_x_new = end_y
+                end_y_new = nx - start_x  # Use nx instead of ny to ensure correct bounds
+
+
+                start_x, start_y, end_x, end_y = start_x_new, start_y_new, end_x_new, end_y_new
+
+        # Ensure scanlines are spaced evenly along the y-axis in the rotated image
+        total_height = end_y - start_y
+        space_between_lines = total_height / (num_lines + 1)
+
+        start = int(start_y + space_between_lines)  # Always space along y-axis
+        diff = int(total_height / (num_lines + 1))
+        end = int(end_y - space_between_lines)
+
+        # Ensure correct number of lines
+        if total_height % (num_lines + 1) == 0:
+            end += 1
+
         data = [
             np.average(
                 image[
-                    y - int(lines_to_avg // 2) : y + int(lines_to_avg / 2),
-                    int(start_x) : int(end_x)
+                    y - int(lines_to_avg // 2): y + int(lines_to_avg / 2),
+                    int(start_x): int(end_x)  # Keep X as the width direction
                 ],
                 axis=0
-                )
+            )
             for y in range(start, end, diff)
         ]
+
         for y in range(start, end, diff):
             y_pos.append((y, y))
-        start_x = [start_x] * len(
-            data
-        )  # Put it in a list so we can access it in process_ddts
+
+        start_x = [start_x] * len(data)  # Ensure tracking alignment
+
+
+
+    # For multiple ROIs when rotate_tracking is True
     elif not have_autocalipers and not single_roi:
         data = []
         start_x = []
         for roi in multi_roi.values():
             x1, y1, x2, y2 = roi.fixed_corners()
+            
+            if rotate_tracking:
+                # Transform ROI coordinates for rotated image
+                x1_new = y1
+                y1_new = nx - x2
+                x2_new = y2
+                y2_new = nx - x1
+                x1, y1, x2, y2 = x1_new, y1_new, x2_new, y2_new
+            
             scan = np.average(
                 image[
                     int(y1) : int(y2),
@@ -168,6 +202,7 @@ def calculate_diameter(
             y_pos.append((y_mean, y_mean))
 
         diff = 0
+
     elif have_autocalipers:
         data = []
         start_x = []
@@ -185,14 +220,32 @@ def calculate_diameter(
 
     # Smooth the data
     window = np.ones(smooth_factor)
-    smoothed = [
-        np.convolve(window / window.sum(), sig, mode="same") for sig in data
-    ]
+    if ultrasound_tracking == 0:
+        smoothed = [
+            np.convolve(window / window.sum(), sig, mode="same") for sig in data
+        ]
+    else:
+        # Define the median filter window size
+        median_window = smooth_factor if smooth_factor % 2 == 1 else smooth_factor + 1  # Must be odd
+        # Apply median filtering instead of moving average smoothing
+        smoothed = [medfilt(sig, kernel_size=median_window) for sig in data]
+
+
     # Differentiate the data. There are other methods in VTutils...
     # But this one is much faster!
     ddts = [diff2(sig, 1) for sig in smoothed]  # Was 1 \\\\\ ULTRASOUND
     window = np.ones(smooth_factor)
     ddts = [np.convolve(window / window.sum(), sig, mode="same") for sig in ddts]
+
+    window = np.ones(smooth_factor)
+    if ultrasound_tracking == 0:
+        ddts = [np.convolve(window / window.sum(), sig, mode="same") for sig in ddts]
+    else:
+        # Define the median filter window size
+        median_window = smooth_factor if smooth_factor % 2 == 1 else smooth_factor + 1  # Must be odd
+        # Apply median filtering instead of moving average smoothing
+        ddts = [medfilt(sig, kernel_size=median_window) for sig in ddts]
+
 
     thresh = 0
     diams = process_ddts(
@@ -204,6 +257,7 @@ def calculate_diameter(
         start_x,
         compute_id,
         default_detection_alg,
+        ultrasound_tracking,
     )
     if diams.outer_diam_pos.ndim == 0:
         return None

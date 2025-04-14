@@ -15,10 +15,10 @@ sys.path.insert(0, spec_dir)
 import version
 from version import __version__
 
-added_files = [("images", "images"), ("SampleData", "SampleData"), ('settings.toml', '.'), ('MMConfig.cfg', '.'), ('Basler.cfg', '.')]
+added_files = [("music", "music"), ("images", "images"), ("SampleData", "SampleData"), ('settings.toml', '.'), ('MMConfig.cfg', '.'), ('Basler.cfg', '.'), ('VasoTrackerblue.json', '.'), ('pacman', 'pacman'), ('space-invaders', 'space-invaders')]
 
 a = Analysis(
-    ['vasotracker_2_0.py'],
+    ['vasotracker_2.py'],
     pathex=[],
     binaries=[],
     datas=added_files,
@@ -47,7 +47,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    uac_admin=True,
+    uac_admin=False,
     icon='C:/Users/Calum/Documents/GitHub/VasoTracker-2/software/vasotracker 2.0/images/vt_icon.ico',
 )
 coll = COLLECT(

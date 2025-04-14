@@ -17,8 +17,20 @@ class CameraBase:
         self.config = config
         self.running = False
 
+
+
     def set_exposure(self, exposure):
+        print(f"Exposure type before conversion: {type(exposure)}")  
+
+        # Convert numpy int32 to standard Python int
+        if isinstance(exposure, np.integer):  
+            exposure = int(exposure)
+
+        print(f"Exposure type after conversion: {type(exposure)}")  
+
         self.mmc.setExposure(exposure)
+
+
 
     def set_pixel_clock(self, pix_clock):
         self.mmc.setProperty(self.device_label, 'PixelClockMHz', pix_clock)

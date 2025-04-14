@@ -33,8 +33,8 @@ class AcquisitionSettings(Configurator):
     exposure: int = 50
     pixel_clock: int = 10
     recording_interval: float = 300.0
-    refresh_min_interval: float = 0.2
-    refresh_faster_interval: float = 0.01
+    refresh_min_interval: float = 0.0000002
+    refresh_faster_interval: float = 0.001
 
     def set_values(self, state: "VtState"):
         acq = state.toolbar.acq
@@ -235,12 +235,9 @@ class Config(Configurator):
 
     def save(self, override_path: Optional[Union[str, Path]] = None):
         path = self.path
-        print("The path is: ", path)
         if override_path is not None:
             path = override_path
-        print("The path is now: ", path)
         data = asdict(self)
-        print("Data: ", data)
         if self.path is not None:
             del data["path"]
         with open(path, "w") as f:

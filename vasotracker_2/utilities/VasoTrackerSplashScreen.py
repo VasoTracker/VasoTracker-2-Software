@@ -16,6 +16,7 @@ import tkinter.messagebox as tmb
 import tkinter.filedialog as tkFileDialog
 from tkinter import ttk 
 from tkinter.font import Font
+import customtkinter as ctk
 import webbrowser
 from PIL import Image, ImageTk #convert cv2 image to tkinter
 E = tk.E
@@ -45,7 +46,7 @@ sample_data_path = get_resource_path("SampleData\\")
 ##################################################
 ## Base Application using init method to launch splash screen and main GUI application 
 ##################################################
-class VasoTrackerSplashScreen(tk.Frame):
+class VasoTrackerSplashScreen(ctk.CTkFrame):
 
     #Initialisation function
     def __init__(self, master, update_settings_callback, *args, **kwargs):
@@ -69,6 +70,13 @@ class VasoTrackerSplashScreen(tk.Frame):
     # make the top right close button minimize (iconify) the main window
         self.splash_win.protocol("WM_DELETE_WINDOW", self.disable_event)
         #self.splash_win.overrideredirect(True)
+        self.splash_win.protocol("WM_DELETE_WINDOW", lambda: None)
+        self.splash_win.resizable(False, False)  # Disable Resizing (Maximize/Minimize)
+        self.splash_win.overrideredirect(True)  # Remove Title Bar (No Controls)
+
+            # Block interaction with anything underneath
+        self.splash_win.grab_set()  # Makes this window modal (blocks input to other windows)
+
 
 
     # Load in the splash screen image

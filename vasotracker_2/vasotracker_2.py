@@ -1,3 +1,6 @@
+## TODO: Update paper link in status_bar 
+
+
 ##################################################
 ## VasoTracker 2.0 Pressure Myograph Software
 ## 
@@ -51,7 +54,7 @@
 ## 
 ##################################################
 
-
+#TODO: Add memory warning for less than 5 seconds recording interval.
 import version
 from version import __version__
 
@@ -79,8 +82,13 @@ import time
 import traceback
 from typing import Callable, Dict, List, Optional, Tuple, Type
 import webbrowser
+# Suppress pygame welcome message
+sys.stdout = open(os.devnull, 'w')
+import pygame
+sys.stdout = sys.__stdout__  # Restore stdout
 
 # Third-party imports
+import random
 from PIL import Image, ImageTk
 import cv2
 import numpy as np
@@ -96,7 +104,7 @@ from tkinter import filedialog, scrolledtext, IntVar, StringVar, DoubleVar, Bool
 import tkinter.messagebox as tmb
 import tkinter.ttk as ttk
 from tkinter import font
-
+import runpy
 
 # Local application/library specific imports
 from utilities.VT_Diameter import ImageDiameters, calculate_diameter
@@ -108,6 +116,9 @@ import utilities.VT_Pressure
 from utilities.VT_Pressure import PressureController
 from cameras import Camera, CameraBase
 from config import AcquisitionSettings, Config, GraphAxisSettings
+import customtkinter as ctk
+import sv_ttk
+
 
 # Conditional imports with user notification for optional dependencies
 try:
@@ -125,8 +136,8 @@ SYS32_PATH = "C:/WINDOWS/SYSTEM32/DRIVERs/"
 BASLER_PATH = os.path.join("C:", os.sep, "Program Files", "Basler/pylon 6/Runtime/x64/")
 BASLER_PATH2 = os.path.join("C:", os.sep, "Program Files", "Basler/pylon 6/Runtime/Win32/")
 
-NUM_LINES = 5
-NUM_ROIS = 5
+NUM_LINES = 10
+NUM_ROIS = 10
 ELLIPSIS = "..."
 CMAP = plt.get_cmap("tab10")
 
@@ -137,7 +148,12 @@ C4 = (10, 131, 135)
 VasoTracker_Green = (10, 131, 135)
 VasoTracker_Green_hex = "#{:02x}{:02x}{:02x}".format(*VasoTracker_Green)
 
-default_font_size = 12
+default_font = 'Arial'
+default_font_size = 14
+VasoTracker_Blue = '#203C57'
+frame_label_color = VasoTracker_Blue
+frame_label_height = 25
+entry_disabled_color="#BDC3C7"
 
 # The following is so that the required resources are included in the PyInstaller build.
 # Utility functions
@@ -146,9 +162,12 @@ def get_resource_path(relative_path):
     base_path = getattr(sys, '_MEIPASS', os.path.abspath("."))
     return os.path.join(base_path, relative_path)
 
+
+
 # Resource paths
 images_folder = get_resource_path("images\\")
 sample_data_path = get_resource_path("SampleData\\")
+gui_json_path = get_resource_path("VasoTrackerblue.json")
 
 # TODOs and Future Improvements
 # TODO:
@@ -186,6 +205,7 @@ class AnalysisPaneState:
     org: BooleanVar = field(default_factory=BooleanVar)
     roi: BooleanVar = field(default_factory=BooleanVar)
     rotate_tracking: BooleanVar = field(default_factory=BooleanVar)
+    ultrasound_tracking: BooleanVar = field(default_factory=BooleanVar)
 
 
 @dataclass
@@ -211,6 +231,18 @@ class PlottingPaneState:
     line_show: List[BooleanVar] = field(
         default_factory=lambda: [BooleanVar() for _ in range(NUM_LINES)]
     )
+    outer_diam_roi: Dict[str, List[float]] = field(default_factory=dict)
+    inner_diam_roi: Dict[str, List[float]] = field(default_factory=dict)
+    
+    # Using DoubleVar for multiple entry boxes
+    outer_diam_values: List[DoubleVar] = field(
+        default_factory=lambda: [DoubleVar() for _ in range(NUM_LINES)]
+    )
+
+    inner_diam_values: List[DoubleVar] = field(
+        default_factory=lambda: [DoubleVar() for _ in range(NUM_LINES)]
+    )
+
 
 
 @dataclass
@@ -225,6 +257,7 @@ class DataAcqPaneState:
     diam_percent: DoubleVar = field(default_factory=DoubleVar)
     caliper_length: DoubleVar = field(default_factory=DoubleVar)
     countdown: IntVar = field(default_factory=IntVar)
+
 
 
 @dataclass
@@ -313,6 +346,7 @@ class AppState:
     tracking: BooleanVar = field(default_factory=BooleanVar)
     tracking_file: BooleanVar = field(default_factory=BooleanVar)
     auto_pressure: BooleanVar = field(default_factory=BooleanVar)
+    file_analysed: BooleanVar = field(default_factory=BooleanVar)
 
 
 @dataclass
@@ -415,6 +449,7 @@ class CsvListWrapper(list):
 @dataclass
 class MeasureStore:
     times: List[float] = field(default_factory=list)
+    formatted_times: List[float] = field(default_factory=list)
     outer_diam: List[float] = field(default_factory=list)
     inner_diam: List[float] = field(default_factory=list)
     markers: List[float] = field(default_factory=list)
@@ -429,6 +464,8 @@ class MeasureStore:
     inner_diam_profile: List[np.ndarray] = field(default_factory=list)
     outer_diam_good: List[np.ndarray] = field(default_factory=list)
     inner_diam_good: List[np.ndarray] = field(default_factory=list)
+    outer_diam_roi: Dict[str, List[float]] = field(default_factory=dict)
+    inner_diam_roi: Dict[str, List[float]] = field(default_factory=dict)
 
     max_len: Optional[int] = None
 
@@ -450,7 +487,8 @@ class MeasureStore:
         ods_valid: np.ndarray,
         ids_valid: np.ndarray,
     ):
-        self.times.append(t)
+        self.times.append(round(t, 1))
+        self.formatted_times.append(time.strftime("%H:%M:%S", time.gmtime(np.round(t, 1))))
         self.outer_diam.append(od)
         self.inner_diam.append(id)
         self.markers.append(marker)
@@ -468,6 +506,7 @@ class MeasureStore:
 
         if self.max_len is not None and len(self.times) > self.max_len:
             self.times = self.times[-self.max_len :]
+            self.formatted_times = self.formatted_times[-self.max_len :]
             self.outer_diam = self.outer_diam[-self.max_len :]
             self.inner_diam = self.inner_diam[-self.max_len :]
             self.markers = self.markers[-self.max_len :] # Working
@@ -485,6 +524,7 @@ class MeasureStore:
     def get_last_row(self):
         return (
             self.times[-1],
+            self.formatted_times[-1],
             self.outer_diam[-1],
             self.inner_diam[-1],
             self.markers[-1],
@@ -503,6 +543,7 @@ class MeasureStore:
     def headers(self):
         return (
             "Time (s)",
+            "Time (hh:mm:ss)",
             "Outer Diameter",
             "Inner Diameter",
             "Table Marker",
@@ -520,6 +561,7 @@ class MeasureStore:
 
     def clear(self):
         self.times.clear()
+        self.formatted_times.clear()
         self.outer_diam.clear()
         self.inner_diam.clear()
         self.markers.clear()
@@ -594,6 +636,8 @@ def rasterise_camera_state(
         x1, y1, x2, y2 = roi.fixed_corners()
         cv2.rectangle(result, (x1, y1), (x2, y2), black, 2)
 
+    
+
     # NOTE(cmo): Draw calipers
     cal = state.caliper
     if cal is not None:
@@ -607,6 +651,8 @@ def rasterise_camera_state(
     for idx, cal in enumerate(state.autocaliper.values()):
         colour = [int(255 * x) for x in cmap[idx]]
         cv2.line(result, (cal.x1, cal.y1), (cal.x2, cal.y2), colour, 2)
+
+    
 
     # Drawing diameter overlays
     if diams is not None:
@@ -622,8 +668,9 @@ def rasterise_camera_state(
             # Check if rotate_tracking was applied during diameter calculation
             if rotate_tracking:
                 # Adjusting for 90 degrees counterclockwise rotation if rotate_tracking is True
-                od_x, od_y = ny - od_y, od_x
-                id_x, id_y = ny - id_y, id_x
+                od_x, od_y = nx - od_y, od_x  # Flip x-axis
+                id_x, id_y = nx - id_y, id_x  # Flip x-axis
+
 
             # Drawing diameters with colors based on outlier status and filter setting
             od_colour = C1_bad if filter_diams and diams.od_outliers[idx] else C1_good
@@ -695,8 +742,9 @@ def compute_diameters_and_rasterise(
     thresh_factor: float,
     filter_diams: bool,
     rotate_tracking: bool,
+    ultrasound_tracking: bool,
 ):
-
+    #print ("frame id == ", frame_id)
     diams = calculate_diameter(
         image=im,
         rds=raster_draw_state,
@@ -709,6 +757,7 @@ def compute_diameters_and_rasterise(
         thresh_factor=thresh_factor,
         filter_means=filter_diams,
         rotate_tracking=rotate_tracking,
+        ultrasound_tracking=ultrasound_tracking,
     )
     image_colour = cv2.cvtColor(im, cv2.COLOR_GRAY2RGB)
     rasterised = rasterise_camera_state(
@@ -740,6 +789,7 @@ class Model:
         self.set_timeout = set_timeout
         self.run_acq_thread = True
         self.acquiring = False
+        self.file_analysed = False
         self.tracking = False
         self.tracking_file = False
         self.notepad_path = None
@@ -756,7 +806,7 @@ class Model:
 
 
         try:
-            self.config = Config.from_file(Path(__file__).parent / self.config_path)
+            self.configure = Config.from_file(Path(__file__).parent / self.config_path)
         except:
             traceback.print_exc()
             self.state.message.type = MessageType.Warning
@@ -765,12 +815,12 @@ class Model:
                 f"Failed to load config from path... loading defaults: {Path(__file__).parent / self.config_path}."
             )
             self.state.message.dirty.set(True)
-            self.config = Config(path=self.config_path)
+            self.configure = Config(path=self.config_path)
 
-        self.config.set_values(self.state)
+        self.configure.set_values(self.state)
         self.setup_thread_pool()
 
-        self.sleep_duration = self.config.acquisition.refresh_min_interval
+        self.sleep_duration = self.configure.acquisition.refresh_min_interval
         self.start_time = 0.0
         self.prev_update = 0.0
         self.time_elapsed = 0.0
@@ -840,7 +890,7 @@ class Model:
         tb.acq.rec_interval.set(1)
 
     def setup_thread_pool(self):
-        num_threads = self.config.analysis.num_threads
+        num_threads = self.configure.analysis.num_threads
         try:
             if self.executor is not None:
                 self.executor.shutdown(wait=False)
@@ -854,7 +904,7 @@ class Model:
         self.futures_to_resolve = deque()
 
     def load_config(self, config: Config):
-        self.config = config
+        self.configure = config
         config.set_values(self.state)
         self.config_path = config.path
         self.state.toolbar.source.settings.set(os.path.split(self.config_path)[1])
@@ -880,7 +930,20 @@ class Model:
         def handle_exposure(*args):
             if self.state.camera is None:
                 return
-            exposure_entry = self.state.toolbar.acq.exposure.get()
+            try:
+                # Attempt to get the entry value
+                exposure_entry = self.state.toolbar.acq.exposure.get()
+
+                # If entry is empty, default to 1
+                if exposure_entry.strip() == "":
+                    exposure_entry = 1
+                else:
+                    # Convert to float first (to support decimal values) and then to int
+                    exposure_entry = int(float(exposure_entry))
+
+            except:
+                # If .get() fails or contains non-numeric data, set a safe default
+                exposure_entry = 1
             exposure = np.clip(exposure_entry, 1, 500)
             self.state.camera.set_exposure(exposure)
             if exposure != exposure_entry:
@@ -915,6 +978,8 @@ class Model:
         )
 
 
+
+
         # NOTE(cmo): Set self.tracking directly off the app.tracking variable
         def set_tracking(*args):
             tracking = self.state.app.tracking.get()
@@ -946,10 +1011,9 @@ class Model:
 
         def set_acq_thread_sleep(*args):
             if self.state.toolbar.acq.fast_mode.get():
-                self.sleep_duration = self.config.acquisition.refresh_faster_interval
+                self.sleep_duration = self.configure.acquisition.refresh_faster_interval
             else:
-                self.sleep_duration = self.config.acquisition.refresh_min_interval
-
+                self.sleep_duration = self.configure.acquisition.refresh_min_interval
         self.state.toolbar.acq.fast_mode.trace_add("write", set_acq_thread_sleep)
 
         def update_scale(*args):
@@ -991,6 +1055,7 @@ class Model:
                 thresh_factor=tb.analysis.thresh_factor.get(),
                 filter_diams=tb.analysis.filter.get(),
                 rotate_tracking=tb.analysis.rotate_tracking.get(),
+                ultrasound_tracking=tb.analysis.ultrasound_tracking.get(),
             )
             self.complete_processing(result)
         else:
@@ -1009,10 +1074,12 @@ class Model:
                 thresh_factor=tb.analysis.thresh_factor.get(),
                 filter_diams=tb.analysis.filter.get(),
                 rotate_tracking=tb.analysis.rotate_tracking.get(),
+                ultrasound_tracking=tb.analysis.ultrasound_tracking.get(),
             )
             self.futures_to_resolve.append(FutureAndCallbackFlag(future))
             self.resolve_next_pending_future()
 
+            
         self.frame_count += 1
 
     def resolve_next_pending_future(self):
@@ -1051,9 +1118,10 @@ class Model:
                 self.state.cam_show.raw_im_data = result.raw_im
                 self.state.cam_show.im_data = result.rasterised
                 self.state.cam_show.dirty.set(True)
-
+            
             if not self.tracking:
                 return
+            
 
             current_time = result.frame_time
             time_elapsed = current_time - self.start_time
@@ -1124,7 +1192,7 @@ class Model:
             have_multi_roi = len(rds.multi_roi) > 0
 
             max_pts = min(
-                self.config.memory.num_plot_points,
+                self.configure.memory.num_plot_points,
                 len(self.state.measure.times),
             )
 
@@ -1169,16 +1237,57 @@ class Model:
                     measure.inner_diam_profile, measure.inner_diam_good
                 )
 
+                '''
+                This should probably be moved somehwere better.
+                '''
                 for i in range(NUM_LINES):
+
+                    # Ensure the key exists in the dictionary, if not, initialize with an empty list
+                    if i not in measure.outer_diam_roi:
+                        measure.outer_diam_roi[i] = []
+
+                    if i not in measure.inner_diam_roi:
+                        measure.inner_diam_roi[i] = []
+
+                    
+
                     graph.od_lines[i].x = new_x
                     graph.od_lines[i].y = sample_masked_diams(masked_ods, i)
                     graph.id_lines[i].x = new_x
                     graph.id_lines[i].y = sample_masked_diams(masked_ids, i)
 
+
+                    if len(graph.od_lines[i].y) > 0 and not np.all(np.isnan(graph.od_lines[i].y)):
+                        line_od_value = np.round(np.nanmean(graph.od_lines[i].y), 1)
+                    else:
+                        # If the od_lines array is empty, set a default value (e.g., np.nan)
+                        line_od_value = np.nan
+
+                    if len(graph.id_lines[i].y) > 0 and not np.all(np.isnan(graph.id_lines[i].y)):
+                        line_id_value = np.round(np.nanmean(graph.id_lines[i].y), 1)
+                    else:
+                        # If the id_lines array is empty, set a default value (e.g., np.nan)
+                        line_id_value = np.nan
+
+                    #Store the values from the od_rois.
+                    measure.outer_diam_roi[i].append(line_od_value)
+                    measure.inner_diam_roi[i].append(line_id_value)
+
+                    # This is used to update the variable in the entry box the show/ hides traces.
+                    tb.plotting.outer_diam_values[i].set(line_od_value)
+                    tb.plotting.inner_diam_values[i].set(line_id_value)
+                    
+
+
+                    
+
             # If image is from file, only update the graph on the last frame.
             if self.state.camera.camera_name == "Image from file":
                 last_frame = self.state.camera.max_frame_count
                 current_frame = self.state.camera.frame_count
+                #print ("last_frame == ", current_frame)
+                #print ("last_frame == ", last_frame)
+
                 if current_frame == last_frame -1:
                     graph.dirty.set(True)
             else:
@@ -1283,77 +1392,155 @@ class Model:
 
     ##### WORKING HERE
 
+
     def acq_thread(self):
+        """
+        Acquisition thread function responsible for managing image acquisition,
+        buffering, and processing for both live camera and file-based camera data.
+
+        The function continuously checks for new images from the camera and updates
+        the queue with the latest image. It manages specific logic for when data is
+        being loaded from a file and when dealing with live camera feeds. Additionally,
+        it handles edge cases such as ensuring the camera buffer is not empty and
+        controlling the slider position when working with image files.
+
+        Behavior Overview:
+            1. Continuously checks if the acquisition thread should keep running (`self.run_acq_thread`).
+            2. If acquiring and no image is available in the queue, it fetches an image from the camera.
+            3. For live camera feeds:
+                - Ensures that the camera buffer is not empty before retrieving an image.
+            4. For image files:
+                - Retrieves images based on the slider position and updates the slider.
+            5. Stops acquiring and resets the system when the last frame is reached in file-based acquisition.
+            6. Handles special cases for loading data and updates the system state accordingly.
+
+        Detailed Steps:
+            1. Checks if the queue is empty and if acquiring is active.
+            2. If acquiring, retrieves the current image from the camera:
+                - For live cameras, checks the buffer status and ensures it is not empty before fetching an image.
+                - For image files, retrieves the image at the current slider position.
+            3. Puts the retrieved image into the processing queue.
+            4. Special case for image files:
+                - Updates the slider and checks if the last frame has been reached. If the last frame is reached, acquisition and tracking are stopped, and the system is reset.
+            5. If acquisition is off and file-based tracking is active:
+                - Retrieves an image based on the slider position and updates diameter values.
+                - Ensures the slider position has changed before updating.
+                - Avoids unnecessary fast spinning on the same frame.
+            6. Sleep duration is adjusted depending on the state of acquisition.
+
+        Attributes:
+            self.run_acq_thread (bool): Flag controlling the thread's active state.
+            self.sleep_duration (float): Duration for which the thread sleeps between iterations.
+            self.state: Contains various state attributes related to camera, acquisition, tracking, toolbar, etc.
+            self.queue: Queue for storing acquired images for processing.
+            self.prev_slider_index (int): The previously used slider index for tracking changes.
+        """
+
         while self.run_acq_thread:
+            camera = self.state.camera
+            file_analysed = self.state.app.file_analysed.get()
+            '''
+            Whenever an image is shown acquiring must be set to true, otherwise an image will not show.
+            Therefore, the logic below cannot rely on acquire == True as this will always be the case when showing an image.
+            '''
             sleep_duration = self.sleep_duration
-            if self.queue.empty() and self.acquiring:
-                camera = self.state.camera
-                if camera and camera.image_ready():
-                    # Need to make sure circular buffer has not reset for uManager cameras (crashes if the buffer is 0)
-                    buffer = camera.is_buffer_empty()
-                    # Logic: If not Offline Analyzer and if live camera buffer is empty, then do not try to get an image. Otherwise, get an image.
-                    if not self.state.camera.camera_name == "Image from file":
-                        if buffer < 1:
-                            time.sleep(sleep_duration)
-                            continue
+            if self.queue.empty() and self.acquiring and not file_analysed:
+                if self.state.camera.camera_name == "Image from file" and not self.tracking:
+                    '''
+                    Load an image and have it show. The image will not be analysed until the analyse button is pressed and self.tracking is True.
+                    '''
+                    slider_img = camera.get_specific_frame(self.state.cam_show.slider_position_manual)
+                    slider_index = int(self.state.cam_show.slider_position_manual)
+                    self.queue.put(slider_img)
+                    self.queue.empty()
+                    # NOTE(cmo): Don't spin super fast on the same frame in this state!
+                    sleep_duration *= 10
+
+                elif self.state.camera.camera_name == "Image from file" and self.tracking and self.tracking_file:
+                    '''
+                    Analyse the loaded file when the analyse button is pressed.
+                    '''
+                    camera.next_position(self.state.app.tracking.get())
+                    self.state.cam_show.slider_dirty.set(True) # Set the slider to the current potition
+                    last_frame = self.state.camera.max_frame_count
+                    current_frame = self.state.camera.frame_count
+
+                    # Clear table and graph
+                    if current_frame == 1:
+                        self.state.table.clear.set(True)
+                        self.state.graph.clear.set(True)
+
+                    # Stop analysis and show graph.
+                    if current_frame == last_frame:
+                        self.state.app.acquiring.set(1)
+                        self.state.app.tracking.set(0)
+                        self.state.app.file_analysed.set(1)
+                        self.state.camera.reinitialize()
+                        self.frames_elapsed = 0
+
+                        # Update the slider to the current position
+                        self.state.cam_show.slider_toggle_dirty.set(True)
+
+                        # Update the graph
+                        self.state.toolbar.graph.limits_dirty.set(True)
+
+                        # Enable the slider
+                        self.state.cam_show.slider_change_state.set(True)
+                    
+                    # Show the images as we analyse them
+                    slider_img = camera.get_specific_frame(self.state.cam_show.slider_position_manual)
+                    self.queue.put(slider_img)
+                    self.queue.empty()
+
+                else:
+                    camera = self.state.camera
+                    if camera and camera.image_ready():
+                        # Need to make sure circular buffer has not reset for uManager cameras (crashes if the buffer is 0)
+                        buffer = camera.is_buffer_empty()
+                        # Logic: If not Offline Analyzer and if live camera buffer is empty, then do not try to get an image. Otherwise, get an image.
+                        if not self.state.camera.camera_name == "Image from file":
+                            if buffer < 1:
+                                time.sleep(sleep_duration)
+                                continue
+                            else:
+                                pass
                         else:
                             pass
-                    else:
-                        pass
+                        try:
+                            img = camera.get_image()
+                        except:
+                            pass
+                        self.queue.put(img)
+                    # NOTE(cmo): Don't spin super fast on the same frame in this state!
+                    sleep_duration *= 10
+
+            elif self.acquiring and self.tracking_file and file_analysed:
+                '''
+                This runs after we have analysed a file and allows us to scroll through the images and plotted graph.
+                '''
+                camera = self.state.camera
+                if self.state.camera.camera_name == "Image from file":
+                    slider_img = camera.get_specific_frame(self.state.cam_show.slider_position_manual)
+                    slider_index = int(self.state.cam_show.slider_position_manual) - 1
+
+                    self.state.toolbar.data_acq.outer_diam.set(np.round(self.state.measure.outer_diam[slider_index], 1))
+                    self.state.toolbar.data_acq.inner_diam.set(np.round(self.state.measure.inner_diam[slider_index], 1))
+                    # If no multi ROIs have been drawn then an error is returned as cant set the value. There way be a better way to do this other than try.
                     try:
-                        img = camera.get_image()
+                        for i in range(NUM_LINES):
+                            self.state.toolbar.plotting.outer_diam_values[i].set(self.state.measure.outer_diam_roi[i][slider_index])
+                            self.state.toolbar.plotting.inner_diam_values[i].set(self.state.measure.inner_diam_roi[i][slider_index])
                     except:
                         pass
-                    self.queue.put(img)
-                    # Special case when we are loading in data.
-                    if self.state.camera.camera_name == "Image from file":
-                        camera.next_position(self.state.app.tracking.get())
-                        self.state.cam_show.slider_dirty.set(True) # Set the slider to the current potition
-                    else:
-                        camera.next_position()
-                    # When loading in data, stop when we reach the end of the file
+                    self.prev_slider_index = slider_index
+                    self.queue.put(slider_img)
+                    self.queue.empty() #This stops the program from constantly trying to find a new image and analysing it when running from file.
 
-                    if self.state.camera.camera_name == "Image from file":
-                        last_frame = self.state.camera.max_frame_count
-                        current_frame = self.state.camera.frame_count
-
-
-                        if current_frame == 1:
-                            self.state.table.clear.set(True)
-                            self.state.graph.clear.set(True)
-
-                        if current_frame == last_frame:
-                            self.state.app.acquiring.set(0)
-                            self.state.app.tracking.set(0)
-                            self.state.camera.reinitialize()
-                            self.frames_elapsed = 0
-
-                            # Also update the slider to the current position
-                            self.state.cam_show.slider_toggle_dirty.set(True)
-
-                            # And update the graph as well
-                            self.state.toolbar.graph.limits_dirty.set(True)
-
-                            # Enable the slider
-                            self.state.cam_show.slider_change_state.set(True)
-
-                            #self.state.toolbar.acq.camera.set("...")
-
+                    # NOTE(cmo): Don't spin super fast on the same frame in this state!
+                    sleep_duration *= 10         
             else:
-                if not self.acquiring and self.tracking_file:
-                    if self.state.camera is not None and self.state.camera.camera_name == "Image from file":
-                        camera = self.state.camera
-                        # Can we get the slider value like we get the image?
-                        img = camera.get_specific_frame(self.state.cam_show.slider_position_manual)
-                        self.queue.put(img)
-                        # NOTE(cmo): Don't spin super fast on the same frame in this state!
-                        sleep_duration *= 10
-
-                    else:
-                        pass
-
+                pass
             time.sleep(sleep_duration)
-
 
     def set_default_graph_lims(self):
         defaults = GraphAxisSettings()
@@ -1382,7 +1569,7 @@ class Model:
             self.mmc.reset()
 
         try:
-            self.state.camera = Camera(cam_name, self.mmc, self.state, self.config)
+            self.state.camera = Camera(cam_name, self.mmc, self.state, self.configure)
             image_dim = self.state.toolbar.image_dim
             if cam_name == "Image from file":
                 w, h, l = self.state.camera.get_camera_dims()
@@ -1460,6 +1647,7 @@ class Model:
             thresh_factor=tb.analysis.thresh_factor.get(),
             filter_means=filter_diams,
             rotate_tracking=tb.analysis.rotate_tracking.get(),
+            ultrasound_tracking=tb.analysis.ultrasound_tracking.get(),
         )
         im_data = cv2.cvtColor(
             self.state.cam_show.raw_im_data,
@@ -1651,24 +1839,24 @@ class Model:
         self.current_table_row += 1
 
 def make_entry_factory(self):
-    def make_entry(EntryType: Type[tk.Widget], row, column=1, disabled=False, **kwargs):
+    def make_entry(EntryType: Type[tk.Widget], row, column=1, sticky="",padx=0, pady=2, disabled=False, **kwargs):
         # Set default width to 8 unless specified in kwargs
-        kwargs.setdefault('width', 8)
+        kwargs.setdefault('width', 50)
         # NOTE(cmo): The need for this is due to tkinter being silly and
         # requiring *args be used for the options in an OptionMenu
         if "args" in kwargs:
             entry = EntryType(self, *kwargs["args"])
         else:
             entry = EntryType(self, **kwargs)
-        entry.grid(row=row, column=column, pady=0)
+        entry.grid(row=row, column=column, padx=padx, pady=pady, sticky=sticky)
         if disabled:
-            entry.config(state=tk.DISABLED)
+            entry.configure(state=tk.DISABLED)
         return entry
 
     return make_entry
 
 
-class ToolbarPane(ttk.LabelFrame):
+class ToolbarPane(ctk.CTkFrame):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
@@ -1684,44 +1872,66 @@ class ToolbarPane(ttk.LabelFrame):
 
 class SourcePane(ToolbarPane):
     def __init__(self, parent, model_vars: VtState):
-        super().__init__(parent, text="Files details:", height=175, width=150)
+        super().__init__(parent,  height=175, width=150)
         self.parent = parent
         self.model_vars = model_vars
         sv = model_vars.toolbar.source
         default_disabled = True
         make_entry = make_entry_factory(self)
 
+        self.frame_label = ctk.CTkLabel(self, text="File details", font=(default_font, 16, 'bold'), fg_color=frame_label_color, height=frame_label_height, text_color='white').grid(row=0, column=0, columnspan=2,padx=1,pady=1, sticky="nsew")
+
         #self.pack(side=tk.LEFT, anchor=tk.N, padx=3, fill=tk.Y)
 
-        ttk.Label(self, text="File:").grid(row=1, column=0, sticky=tk.E)
+        ctk.CTkLabel(self, text="File:", font=(default_font, default_font_size)).grid(row=1, column=0, sticky=tk.E)
         self.save_entry = make_entry(
-            ttk.Entry,
+            ctk.CTkEntry,
             row=1,
             column=1,
             disabled=default_disabled,
             textvariable=sv.filename,
-            width=15,
+            font=(default_font, default_font_size),
+            fg_color = entry_disabled_color,
+            width=300,
         )
 
-        ttk.Label(self, text="Settings:").grid(row=2, column=0, sticky=tk.E)
+        ctk.CTkLabel(self, text="Settings:", font=(default_font, default_font_size)).grid(row=2, column=0, sticky=tk.E)
         self.settings_entry = make_entry(
-            ttk.Entry,
+            ctk.CTkEntry,
             row=2,
             column=1,
             disabled=default_disabled,
             textvariable=sv.settings,
-            width=15,
+            font=(default_font, default_font_size),
+            fg_color = entry_disabled_color,
+            width=300,
         )
 
 
 class AcquisitionSettingsPane(ToolbarPane):
-    def __init__(self, parent, model_vars: VtState):
-        super().__init__(parent, text="Acquisition Settings", height=200, width=300)
+    def __init__(self, parent, model_vars: VtState, set_camera_callback):
+        super().__init__(parent)
+        self.set_camera_callback = set_camera_callback
         self.parent = parent
         self.model_vars = model_vars
         sv = model_vars.toolbar.acq
+        make_entry = make_entry_factory(self)
+
+        # Set a fixed size
+        self.configure(width=220, height=150)  
+        self.grid_propagate(False)  # Prevent shrinking/expanding if using grid
+        self.pack_propagate(False)  # Prevent resizing if using pack
+
+        # Apply grid column weight
+        #self.columnconfigure(0, weight=1)  # Make column 0 expand
+        #self.columnconfigure(1, weight=1)  # Make column 1 expand
+
         default_disabled = True
         self.pack(side=tk.LEFT, anchor=tk.N, padx=5, pady=5, fill=tk.Y)
+
+        self.frame_label = ctk.CTkLabel(self, text="Acquisition Settings", font=(default_font, 16, 'bold'), fg_color=frame_label_color, height=frame_label_height, text_color='white').grid(row=0, column=0, columnspan=2,padx=1,pady=1, sticky="nsew")
+
+
 
         self.res_options = [
             "...",
@@ -1734,8 +1944,6 @@ class AcquisitionSettingsPane(ToolbarPane):
         ]
         self.fov_options = ["w x h", "w/2 x h/2"]
 
-        make_entry = make_entry_factory(self)
-
         self.camera_options = ["..."] + list(Camera.registry.keys())
 
 
@@ -1745,76 +1953,104 @@ class AcquisitionSettingsPane(ToolbarPane):
         # Calculate the length of the longest string in camera_options
         max_length = max(len(option) for option in self.camera_options)
 
+        entry_width = 50
+        entry_height = 25
+        padx=(0,10)
 
-        ttk.Label(self, text="Camera:").grid(row=0, column=0, sticky=tk.E)
-        self.camera_entry = make_entry(
-            ttk.OptionMenu,
-            args=(sv.camera, self.camera_options[0], *self.camera_options),
-            row=0,
-            column=1,
-            sticky=tk.EW
-        )
+        ctk.CTkLabel(self, text="Camera:", font=(default_font, default_font_size)).grid(row=1, column=0, padx=padx, sticky=tk.E)
+        self.camera_entry = ttk.OptionMenu(self, sv.camera, *self.camera_options, command=self.set_camera_callback)
 
+        self.camera_entry.grid(row=1, column=1, sticky=tk.EW)
+
+        #self.camera_entry.configure(width=8) #### Do not have this! It interferes with loading a file!
         default_disabled = True
 
         self.model_vars.toolbar.acq.camera.trace_add(
             "write", lambda *args: self.set_lock_state_when_no_camera()
         )
 
-        ttk.Label(self, text="Scale (\u03bcm/px):").grid(row=1, column=0, sticky=tk.E)
+        ctk.CTkLabel(self, text="Scale (\u03bcm/px):", font=(default_font, default_font_size)).grid(row=2, column=0,padx=padx, sticky=tk.E)
         self.scale_entry = make_entry(
-            ttk.Entry,
+            ctk.CTkEntry,
             textvariable=sv.scale,
-            row=1,
-            column=1,
-            disabled=True,
-        )
-
-        ttk.Label(self, text="Exp (ms):").grid(row=2, column=0, sticky=tk.E)
-        self.exposure_entry = make_entry(
-            ttk.Entry,
-            textvariable=sv.exposure,
+            font=(default_font, default_font_size),
+            fg_color=entry_disabled_color,
             row=2,
             column=1,
+            width = entry_width,
+            height=entry_height,
             disabled=True,
+            sticky=tk.W
         )
 
-        ttk.Label(self, text="Acq rate (Hz):").grid(row=4, column=0, sticky=tk.E)
+        ctk.CTkLabel(self, text="Exp (ms):", font=(default_font, default_font_size)).grid(row=3, column=0, padx=padx, sticky=tk.E)
+        self.exposure_entry = make_entry(
+            ctk.CTkEntry,
+            textvariable=sv.exposure,
+            font=(default_font, default_font_size),
+            fg_color=entry_disabled_color,
+            row=3,
+            column=1,
+            width = entry_width,
+            height=entry_height,
+            disabled=True,
+            sticky=tk.W
+        )
+
+        ctk.CTkLabel(self, text="Acq rate (Hz):", font=(default_font, default_font_size)).grid(row=4, column=0, padx=padx, sticky=tk.E)
         self.acq_rate_entry = make_entry(
-            ttk.Entry,
+            ctk.CTkEntry,
             textvariable=sv.acq_rate,
+            font=(default_font, default_font_size),
+            fg_color=entry_disabled_color,
             row=4,
             column=1,
+            width = entry_width,
+            height=entry_height,
             disabled=True,
+            sticky=tk.W
         )
-        ttk.Label(self, text="Rec intvl (s):").grid(row=5, column=0, sticky=tk.E)
+        ctk.CTkLabel(self, text="Rec intvl (s):", font=(default_font, default_font_size)).grid(row=5, column=0, padx=padx, sticky=tk.E)
         self.rec_interval_entry = make_entry(
-            ttk.Entry,
+            ctk.CTkEntry,
             textvariable=sv.rec_interval,
+            font=(default_font, default_font_size),
+            fg_color=entry_disabled_color,
             row=5,
             column=1,
+            width = entry_width,
+            height=entry_height,
             disabled=True,
+            sticky=tk.W
         )
 
-        self.default_settings = ttk.Checkbutton(
+        self.default_settings = ctk.CTkCheckBox(
             self,
             text="Default",
+            font=(default_font, default_font_size),
             variable=sv.default_settings,
+            checkbox_width=20,
+            checkbox_height=20,
+            border_width=2
         )
-        self.default_settings.grid(row=6, column=0, padx=0, pady=0, sticky=tk.W)
+        self.default_settings.grid(row=6, column=0, padx=5, pady=0, sticky=tk.E)
 
-        self.faster_settings = ttk.Checkbutton(
+        self.faster_settings = ctk.CTkCheckBox(
             self,
             text="Fast",
+            font=(default_font, default_font_size),
             variable=sv.fast_mode,
+            checkbox_width=20,
+            checkbox_height=20,
+            border_width=2
         )
-        self.faster_settings.grid(row=6, column=1, padx=0, pady=0, sticky=tk.W)
+        self.faster_settings.grid(row=6, column=1, padx=5, pady=0, sticky=tk.E)
         self.faster_settings.configure(state=tk.DISABLED)
 
         # Uncomment to add ability to set binning and FOV
 
         '''
-        ttk.Label(self, text="Res:").grid(row=7, column=0, sticky=tk.E)
+        ctk.CTkLabel(self, text="Res:").grid(row=7, column=0, sticky=tk.E)
         self.res_entry = make_entry(
             ttk.OptionMenu,
             args=(sv.res, self.res_options[0], *self.res_options),
@@ -1823,7 +2059,7 @@ class AcquisitionSettingsPane(ToolbarPane):
             column=1,
         )
 
-        ttk.Label(self, text="FOV:").grid(row=8, column=0, sticky=tk.E)
+        ctk.CTkLabel(self, text="FOV:").grid(row=8, column=0, sticky=tk.E)
         self.fov_entry = make_entry(
             ttk.OptionMenu,
             args=(sv.fov, self.fov_options[0], *self.fov_options),
@@ -1883,11 +2119,14 @@ class AcquisitionSettingsPane(ToolbarPane):
         def callback(*args):
             default = self.model_vars.toolbar.acq.default_settings.get()
             state = tk.DISABLED if default else tk.NORMAL
-            self.scale_entry.configure(state=state)
-            self.exposure_entry.configure(state=state)
-            #self.pix_clock_entry.configure(state=state)
-            self.rec_interval_entry.configure(state=state)
-            self.faster_settings.configure(state=state)
+            fg_color = entry_disabled_color if default else "white"
+
+            # If using CustomTkinter (CTkEntry)
+            self.scale_entry.configure(state=state, fg_color=fg_color)
+            self.exposure_entry.configure(state=state, fg_color=fg_color)
+            self.rec_interval_entry.configure(state=state, fg_color=fg_color)
+            self.faster_settings.configure(state=state, fg_color=fg_color)
+
 
         self.model_vars.toolbar.acq.default_settings.trace_add("write", callback)
 
@@ -1904,64 +2143,108 @@ class AcquisitionSettingsPane(ToolbarPane):
 
         faster_settings.trace_add("write", callback)
 
-from tkinter import Scale
 class AnalysisSettingsPane(ToolbarPane):
     def __init__(self, parent, model_vars: VtState):
-        super().__init__(parent, text="Analysis Settings", height=175, width=150)
+        super().__init__(parent)
         self.parent = parent
         self.model_vars = model_vars
         sv = model_vars.toolbar.analysis
 
-        self.pack(side=tk.LEFT, anchor=tk.N, padx=5, pady=5, fill=tk.Y)
+                # Set a fixed size
+        self.configure(width=250, height=150)  
+        self.grid_propagate(False)  # Prevent shrinking/expanding if using grid
+        self.pack_propagate(False)  # Prevent resizing if using pack
 
+        # Apply grid column weight
+        self.columnconfigure(0, weight=1)  # Make column 0 expand
+        self.columnconfigure(1, weight=1)  # Make column 1 expand
+
+        self.pack(side=tk.LEFT, anchor=tk.N, padx=5, pady=5, fill=tk.Y)
+        
         make_entry = make_entry_factory(self)
 
-        ttk.Label(self, text="# of lines:").grid(row=0, column=0, sticky=tk.E)
-        self.num_lines_entry = tk.Scale(self, from_=2, to=25, resolution=1, orient=tk.HORIZONTAL, variable=sv.num_lines, showvalue=False)
-        self.num_lines_entry.grid(row=0, column=1, columnspan=2)  # Span two columns
 
-        self.num_lines_value_label = ttk.Label(self, textvariable=sv.num_lines)
-        self.num_lines_value_label.grid(row=0, column=3)  # Adjusted to be in the next column after the span
+        
+        # === Sliders Frame ===
+        self.sliders_frame = ctk.CTkFrame(self, border_width=0)
+        self.sliders_frame.pack(fill="x")
 
-        ttk.Label(self, text="Smooth:").grid(row=1, column=0, sticky=tk.E)
-        self.smooth_scale = tk.Scale(self, from_=1, to=30, resolution=1, orient=tk.HORIZONTAL, variable=sv.smooth_factor, showvalue=False)
-        self.smooth_scale.grid(row=1, column=1, columnspan=2)  # Span two columns
+        self.sliders_frame.columnconfigure(0, weight=1)
+        self.sliders_frame.columnconfigure(1, weight=3)
+        self.sliders_frame.columnconfigure(2, weight=1)
 
-        self.smooth_value_label = ttk.Label(self, textvariable=sv.smooth_factor)
-        self.smooth_value_label.grid(row=1, column=3)  # Adjusted accordingly
+        # === Checkboxes Frame ===
+        self.checkboxes_frame = ctk.CTkFrame(self, border_width=0)
+        self.checkboxes_frame.pack(fill="x")
 
-        # Repeat the pattern for the rest of the scales and labels
-        ttk.Label(self, text="Integration:").grid(row=2, column=0, sticky=tk.E)
-        self.integration_scale = tk.Scale(self, from_=2, to=20, resolution=1, orient=tk.HORIZONTAL, variable=sv.integration_factor, showvalue=False)
-        self.integration_scale.grid(row=2, column=1, columnspan=2)
 
-        self.integration_value_label = ttk.Label(self, textvariable=sv.integration_factor)
-        self.integration_value_label.grid(row=2, column=3)
+        padx=3
+        pady=3
+        slider_width = 120
+        checkbox_height = 20
+        checkbox_width = 20
 
-        ttk.Label(self, text="Threshold:").grid(row=3, column=0, sticky=tk.E)
-        self.thresh_scale = tk.Scale(self, from_=0.5, to=9.5, resolution=0.1, orient=tk.HORIZONTAL, variable=sv.thresh_factor, showvalue=False)
-        self.thresh_scale.grid(row=3, column=1, columnspan=2)
+        self.frame_label = ctk.CTkLabel(self.sliders_frame, text="Analysis settings", font=(default_font, 16, 'bold'), fg_color=frame_label_color, height=frame_label_height, text_color='white').grid(row=0, column=0, columnspan=3,padx=1,pady=1, sticky="nsew")
 
-        self.thresh_value_label = ttk.Label(self, textvariable=sv.thresh_factor)
-        self.thresh_value_label.grid(row=3, column=3)
 
-        # Adjust the column for the checkbuttons to start in the second column
-        self.filter_entry = ttk.Checkbutton(self, text="Filter", variable=sv.filter)
-        self.filter_entry.grid(row=4, column=1, padx=0, pady=0, sticky=tk.W)
+        ctk.CTkLabel(self.sliders_frame, text="# of lines:", font=(default_font, default_font_size)).grid(row=1, column=0, padx=padx, pady=pady, sticky=tk.E)
+        self.num_lines_entry = ctk.CTkSlider(self.sliders_frame, from_=2, to=25, orientation=tk.HORIZONTAL, variable=sv.num_lines, width=slider_width)
+        self.num_lines_entry.grid(row=1, column=1, padx=padx, pady=pady)  # Span two columns
 
-        self.roi_entry = ttk.Checkbutton(self, text="ROI", variable=sv.roi)
-        self.roi_entry.grid(row=4, column=2, padx=0, pady=0, sticky=tk.W)  # Moved to the third column to align with the layout
+        self.num_lines_value_label = ctk.CTkLabel(self.sliders_frame, textvariable=sv.num_lines, font=(default_font, default_font_size))
+        self.num_lines_value_label.grid(row=1, column=2, padx=padx, pady=pady, sticky=tk.W)  # Adjusted to be in the next column after the span
+
+        ctk.CTkLabel(self.sliders_frame, text="Smooth:", font=(default_font, default_font_size)).grid(row=2, column=0, padx=padx, pady=pady, sticky=tk.E)
+        self.smooth_scale = ctk.CTkSlider(self.sliders_frame, from_=1, to=101, orientation=tk.HORIZONTAL, variable=sv.smooth_factor, width=slider_width)
+        self.smooth_scale.grid(row=2, column=1, padx=padx, pady=pady)  # Span two columns
+
+        self.smooth_value_label = ctk.CTkLabel(self.sliders_frame, textvariable=sv.smooth_factor, font=(default_font, default_font_size))
+        self.smooth_value_label.grid(row=2, column=2, padx=padx, pady=pady, sticky=tk.W)  # Adjusted accordingly
+
+        ctk.CTkLabel(self.sliders_frame, text="Integration:", font=(default_font, default_font_size)).grid(row=3, column=0, padx=padx, pady=pady, sticky=tk.E)
+        self.integration_scale = ctk.CTkSlider(self.sliders_frame, from_=2, to=100, orientation=tk.HORIZONTAL, variable=sv.integration_factor, width=slider_width)
+        self.integration_scale.grid(row=3, column=1, padx=padx, pady=pady)
+
+        self.integration_value_label = ctk.CTkLabel(self.sliders_frame, textvariable=sv.integration_factor, font=(default_font, default_font_size))
+        self.integration_value_label.grid(row=3, column=2, padx=padx, pady=pady, sticky=tk.W)
+
+        formatted_thresh = tk.StringVar(value=f"{sv.thresh_factor.get():.1f}")
+        def update_slider_value(value):
+            rounded_value = round(float(value), 1)  # Proper rounding
+            sv.thresh_factor.set(rounded_value)  # Update DoubleVar
+            formatted_thresh.set(f"{rounded_value:.1f}")  # Store formatted display value
+
+        ctk.CTkLabel(self.sliders_frame, text="Threshold:", font=(default_font, default_font_size)).grid(row=4, column=0, padx=padx, pady=pady,sticky=tk.E)
+        self.thresh_scale = ctk.CTkSlider(self.sliders_frame, from_=0.5, to=9.5, number_of_steps=90, orientation=tk.HORIZONTAL, variable=sv.thresh_factor, width=slider_width, command=update_slider_value)
+        self.thresh_scale.grid(row=4, column=1, padx=padx, pady=pady)
+
+        self.thresh_value_label = ctk.CTkLabel(self.sliders_frame, textvariable=formatted_thresh, font=(default_font, default_font_size))
+        self.thresh_value_label.grid(row=4, column=2, padx=padx, pady=pady, sticky=tk.W)
+
+        # CheckBoxes
+        self.checkboxes_frame.columnconfigure(0, weight=1)
+        self.checkboxes_frame.columnconfigure(1, weight=1)
+        self.checkboxes_frame.columnconfigure(2, weight=1)
+
+
+        self.filter_entry = ctk.CTkCheckBox(self.checkboxes_frame, text="Filter", font=(default_font, default_font_size), variable=sv.filter, checkbox_height=checkbox_height, checkbox_width=checkbox_width)
+        self.filter_entry.grid(row=0, column=0, padx=padx, pady=pady, sticky=tk.NS)
+        '''
+        self.roi_entry = ctk.CTkCheckBox(self.checkboxes_frame, text="ROI", variable=sv.roi, checkbox_height=checkbox_height, checkbox_width=checkbox_width)
+        self.roi_entry.grid(row=0, column=1, padx=padx, pady=pady, sticky=tk.E)  # Moved to the third column to align with the layout
         self.roi_entry.configure(state=tk.DISABLED)
+        '''
+        self.ID_entry = ctk.CTkCheckBox(self.checkboxes_frame, text="ID", font=(default_font, default_font_size), variable=sv.ID, checkbox_height=checkbox_height, checkbox_width=checkbox_width)
+        self.ID_entry.grid(row=0, column=1, sticky=tk.NS)
 
-        self.ID_entry = ttk.Checkbutton(self, text="ID", variable=sv.ID)
-        self.ID_entry.grid(row=5, column=1, padx=0, pady=0, sticky=tk.W)
+        self.org_entry = ctk.CTkCheckBox(self.checkboxes_frame, text="Fluor", font=(default_font, default_font_size), variable=sv.org, checkbox_height=checkbox_height, checkbox_width=checkbox_width)
+        self.org_entry.grid(row=1, column=0, padx=padx, pady=pady, sticky=tk.NS)  # Moved to the third column for consistency
 
-        self.org_entry = ttk.Checkbutton(self, text="Fluor", variable=sv.org)
-        self.org_entry.grid(row=5, column=2, padx=0, pady=0, sticky=tk.W)  # Moved to the third column for consistency
+        self.rotate_entry = ctk.CTkCheckBox(self.checkboxes_frame, text="90\u00B0", font=(default_font, default_font_size), variable=sv.rotate_tracking, checkbox_height=checkbox_height, checkbox_width=checkbox_width)
+        self.rotate_entry.grid(row=1, column=1, padx=padx, pady=pady, sticky=tk.NS)  # Moved to the third column for consistency
 
-        self.rotate_entry = ttk.Checkbutton(self, text="90\u00B0", variable=sv.rotate_tracking)
-        self.rotate_entry.grid(row=6, column=1, padx=0, pady=0, sticky=tk.W)  # Moved to the third column for consistency
-
+        self.org_entry = ctk.CTkCheckBox(self.checkboxes_frame, text="US", font=(default_font, default_font_size), variable=sv.ultrasound_tracking, checkbox_height=checkbox_height, checkbox_width=checkbox_width)
+        self.org_entry.grid(row=1, column=2, padx=padx, pady=pady, sticky=tk.NS)  # Moved to the third column for consistency
 
         # Create a single tooltip instance for the container
         tooltip = ToolTip(self)
@@ -1973,7 +2256,7 @@ class AnalysisSettingsPane(ToolbarPane):
             self.integration_scale: "Set the number of pixel rows used for each line profile.",
             self.thresh_scale: "Set the threshold for identifying outliers.",
             self.filter_entry: "Enable or disable outlier detection.",
-            self.roi_entry: "Enable or disable region of interest (ROI) tracking.",
+            #self.roi_entry: "Enable or disable region of interest (ROI) tracking.",
             self.ID_entry: "Enable or disable inner diameter tracking.",
             self.org_entry: "Enable or disable fluorescence tracking mode.",
             self.rotate_entry: "Switch between horizontal and vertical tracking.",
@@ -1983,122 +2266,173 @@ class AnalysisSettingsPane(ToolbarPane):
             tooltip.register(widget, text)
 
 
+
 class GraphSettingsPane(ToolbarPane):
     def __init__(self, parent, model_vars: VtState):
-        super().__init__(parent, text="Graph Settings", height=175, width=150)
+        super().__init__(parent, height=175, width=150)
         self.parent = parent
         self.model_vars = model_vars
         sv = model_vars.toolbar.graph
+        padx = 5
+        pady = 5
 
         #self.pack(side=tk.LEFT, anchor=tk.N, padx=5, pady=5, fill=tk.Y)
 
         make_entry = make_entry_factory(self)
+        self.frame_label = ctk.CTkLabel(self, text="Graph settings", font=(default_font, 16, 'bold'), fg_color=frame_label_color, height=frame_label_height, text_color='white').grid(row=0, column=0, columnspan=3,padx=1,pady=1, sticky="nsew")
 
-        ttk.Label(self, text="Min:").grid(row=0, column=1, sticky=tk.E)
-        ttk.Label(self, text="Max:").grid(row=0, column=2, sticky=tk.E)
-        ttk.Label(self, text="Time:").grid(row=1, column=0, sticky=tk.E)
-        ttk.Label(self, text="OD:").grid(row=2, column=0, sticky=tk.E)
-        ttk.Label(self, text="ID:").grid(row=3, column=0, sticky=tk.E)
+        ctk.CTkLabel(self, text="Min:", font=(default_font, default_font_size)).grid(row=1, column=1, sticky=tk.NS, padx=padx, pady=pady)
+        ctk.CTkLabel(self, text="Max:", font=(default_font, default_font_size)).grid(row=1, column=2, sticky=tk.NS, padx=padx, pady=pady)
+        ctk.CTkLabel(self, text="Time:", font=(default_font, default_font_size)).grid(row=2, column=0, sticky=tk.E, padx=padx, pady=pady)
+        ctk.CTkLabel(self, text="OD:", font=(default_font, default_font_size)).grid(row=3, column=0, sticky=tk.E, padx=padx, pady=pady)
+        ctk.CTkLabel(self, text="ID:", font=(default_font, default_font_size)).grid(row=4, column=0, sticky=tk.E, padx=padx, pady=pady)
+
+        graphaxes_entry_width = 75
 
         self.x_min_entry = make_entry(
-            ttk.Entry,
+            ctk.CTkEntry,
             textvariable=sv.x_min,
-            width=8,
-            row=1,
+            font=(default_font, default_font_size),
+            fg_color = "white",
+            width=graphaxes_entry_width,
+            row=2,
             column=1,
+            padx=padx,
+            pady=pady
         )
 
         self.x_max_entry = make_entry(
-            ttk.Entry,
+            ctk.CTkEntry,
             textvariable=sv.x_max,
-            width=8,
-            row=1,
+            font=(default_font, default_font_size),
+            fg_color = "white",
+            width=graphaxes_entry_width,
+            row=2,
             column=2,
+            padx=padx,
+            pady=pady
         )
         self.y_min_od_entry = make_entry(
-            ttk.Entry,
+            ctk.CTkEntry,
             textvariable=sv.y_min_od,
-            width=8,
-            row=2,
+            font=(default_font, default_font_size),
+            fg_color = "white",
+            width=graphaxes_entry_width,
+            row=3,
             column=1,
+            padx=padx,
+            pady=pady
         )
         self.y_max_od_entry = make_entry(
-            ttk.Entry,
+            ctk.CTkEntry,
             textvariable=sv.y_max_od,
-            width=8,
-            row=2,
+            font=(default_font, default_font_size),
+            fg_color = "white",
+            width=graphaxes_entry_width,
+            row=3,
             column=2,
+            padx=padx,
+            pady=pady
         )
         self.y_min_id_entry = make_entry(
-            ttk.Entry,
+            ctk.CTkEntry,
             textvariable=sv.y_min_id,
-            width=8,
-            row=3,
+            font=(default_font, default_font_size),
+            fg_color = "white",
+            width=graphaxes_entry_width,
+            row=4,
             column=1,
+            padx=padx,
+            pady=pady
         )
         self.y_max_id_entry = make_entry(
-            ttk.Entry,
+            ctk.CTkEntry,
             textvariable=sv.y_max_id,
-            width=8,
-            row=3,
+            font=(default_font, default_font_size),
+            fg_color = "white",
+            width=graphaxes_entry_width,
+            row=4,
             column=2,
+            padx=padx,
+            pady=pady
         )
-        self.set_button = ttk.Button(self, width=8, text="Set")
-        self.set_button.grid(row=5, column=1, padx=0, pady=0)
-        self.default_button = ttk.Button(self, width=8, text="Default")
-        self.default_button.grid(row=5, column=2, padx=0, pady=0)
+        self.set_button = ctk.CTkButton(self, width=70, text="Set", font=(default_font, default_font_size),text_color="black")
+        self.set_button.grid(row=6, column=1, padx=padx, pady=pady)
+        self.default_button = ctk.CTkButton(self, width=70, text="Default", font=(default_font, default_font_size), text_color="black")
+        self.default_button.grid(row=6, column=2, padx=padx, pady=pady)
 
 
 class CaliperROIPane(ToolbarPane):
     def __init__(self, parent, model_vars: VtState):
-        super().__init__(parent, text="ROI")
+        super().__init__(parent)
         self.parent = parent
         self.model_vars = model_vars
         sv = model_vars.toolbar.caliper_roi
 
         self.pack(side=tk.LEFT, anchor=tk.N, padx=5, pady=5, fill=tk.Y)
 
-        # Adjusted resize_img method calls
-        self.roi_img = self.resize_img(os.path.join(images_folder, 'ROI Button.png'))
-        self.caliper_img = self.resize_img(os.path.join(images_folder, 'Caliper Button.png'))
-        self.add_img = self.resize_img(os.path.join(images_folder, 'Add Button.png'))
-        self.remove_img = self.resize_img(os.path.join(images_folder, 'Remove Button.png'))
-        self.bin_img = self.resize_img(os.path.join(images_folder, 'Delete Button.png'))
+        BUTTON_WIDTH = 30
+        BUTTON_HEIGHT = 30
+        RADIO_DIAM = 20
+        padx = (8,1)
+        pady = 3
 
-        self.draw_roi_button = ttk.Button(self, image=self.roi_img)
-        self.draw_roi_button.grid(row=1, column=0, padx=2, pady=2)
+        # Adjusted resize_img method calls
+        self.roi_img = self.resize_img(os.path.join(images_folder, 'ROI Button.png'), BUTTON_WIDTH, BUTTON_HEIGHT)
+        self.caliper_img = self.resize_img(os.path.join(images_folder, 'Caliper Button.png'), BUTTON_WIDTH, BUTTON_HEIGHT)
+        self.add_img = self.resize_img(os.path.join(images_folder, 'Add Button.png'), BUTTON_WIDTH, BUTTON_HEIGHT)
+        self.remove_img = self.resize_img(os.path.join(images_folder, 'Remove Button.png'), BUTTON_WIDTH, BUTTON_HEIGHT)
+        self.bin_img = self.resize_img(os.path.join(images_folder, 'Delete Button.png'), BUTTON_WIDTH, BUTTON_HEIGHT)
+
+        self.frame_label = ctk.CTkLabel(self, text="Regions of interest", font=(default_font, 16, 'bold'), fg_color=frame_label_color, height=frame_label_height, text_color='white').grid(row=0, column=0, columnspan=3,padx=1,pady=1, sticky="nsew")
+
+        self.single_label = ctk.CTkLabel(self, text="Single ROIs:", font=(default_font, default_font_size)).grid(row=1, column=0, padx=padx, pady=0, columnspan=3, sticky="w")
+
+        self.draw_roi_button = ctk.CTkButton(self, image=self.roi_img, text="", height=BUTTON_HEIGHT, width=BUTTON_WIDTH)
+        self.draw_roi_button.grid(row=2, column=0, padx=padx, pady=pady, sticky="ns")
         self.draw_roi_button.image = self.roi_img  # Keep a reference
 
-        self.draw_caliper_button = ttk.Button(self, image=self.caliper_img)
-        self.draw_caliper_button.grid(row=1, column=1, padx=2, pady=2)
+        self.draw_caliper_button = ctk.CTkButton(self, image=self.caliper_img, text="", height=BUTTON_HEIGHT, width=BUTTON_WIDTH)
+        self.draw_caliper_button.grid(row=2, column=1, padx=padx, pady=pady, sticky="ns")
         self.draw_caliper_button.image = self.caliper_img  # Keep a reference
 
-        self.delete_roi_caliper_button = ttk.Button(self, image=self.bin_img)
-        self.delete_roi_caliper_button.grid(row=1, column=3, padx=2, pady=2)
+        self.delete_roi_caliper_button = ctk.CTkButton(self, image=self.bin_img, text="", height=BUTTON_HEIGHT, width=BUTTON_WIDTH)
+        self.delete_roi_caliper_button.grid(row=2, column=2, padx=(8,8), pady=pady, sticky="ns")
         self.delete_roi_caliper_button.image = self.bin_img  # Keep a reference
 
+        self.multi_label = ctk.CTkLabel(self, text="Multiple ROIs:", font=(default_font, default_font_size)).grid(row=3, column=0, padx=padx, pady=0, columnspan=3, sticky="w")
 
-        self.multi_label = ttk.Label(self, text="Multi:").grid(row=2, column=0, columnspan=2, sticky=tk.EW)
+        self.roi_button = ctk.CTkRadioButton(self, variable=sv.roi_flag, text="Box", value='ROI', font=(default_font, default_font_size), radiobutton_height=RADIO_DIAM, radiobutton_width=RADIO_DIAM)
+        self.roi_button.grid(row=4, column=0, padx=padx, pady=pady, columnspan=2, sticky="w")
 
-        self.roi_button = ttk.Radiobutton(self, variable=sv.roi_flag, text="Rect", value='ROI')
-        self.roi_button.grid(row=3, column=0, padx=2, pady=2, sticky=tk.EW)
+        self.caliper_button = ctk.CTkRadioButton(self, variable=sv.roi_flag, text="Line", value='Caliper', font=(default_font, default_font_size), radiobutton_height=RADIO_DIAM, radiobutton_width=RADIO_DIAM)
+        self.caliper_button.grid(row=4, column=1, padx=padx, pady=pady, columnspan=2, sticky="w")
 
-        self.caliper_button = ttk.Radiobutton(self, variable=sv.roi_flag, text="Line", value='Caliper')
-        self.caliper_button.grid(row=3, column=1, padx=2, pady=2, sticky=tk.EW)
-
-        self.auto_add_button = ttk.Button(self, image=self.add_img)
-        self.auto_add_button.grid(row=4, column=0, padx=2, pady=2)
+        self.auto_add_button = ctk.CTkButton(self, image=self.add_img, text="", height=BUTTON_HEIGHT, width=BUTTON_WIDTH)
+        self.auto_add_button.grid(row=5, column=0, padx=padx, pady=pady, sticky="ns")
         self.auto_add_button.image = self.add_img  # Keep a reference
 
-        self.auto_delete_button = ttk.Button(self, image=self.remove_img)
-        self.auto_delete_button.grid(row=4, column=1, padx=2, pady=2)
+        self.auto_delete_button = ctk.CTkButton(self, image=self.remove_img, text="", height=BUTTON_HEIGHT, width=BUTTON_WIDTH)
+        self.auto_delete_button.grid(row=5, column=1, padx=padx, pady=pady, sticky="ns")
         self.auto_delete_button.image = self.remove_img  # Keep a reference
 
-        self.auto_delete_all_button = ttk.Button(self, image=self.bin_img)
-        self.auto_delete_all_button.grid(row=4, column=3, padx=2, pady=2)
+        self.auto_delete_all_button = ctk.CTkButton(self, image=self.bin_img, text="", height=BUTTON_HEIGHT, width=BUTTON_WIDTH)
+        self.auto_delete_all_button.grid(row=5, column=2, padx=(8,8), pady=pady, sticky="ns")
         self.auto_delete_all_button.image = self.bin_img  # Keep a reference
 
+        self.showtraces_button = ctk.CTkButton(self, text="Show/ Hide Traces", font=(default_font, 16), text_color=VasoTracker_Blue, height=30, width=150)
+        self.showtraces_button.grid(row=6, column=0, columnspan=3, padx=(8,8), pady=pady, sticky="ns")
 
+        '''
+        # Ensure equal column width distribution
+        for i in range(3):  # 3 columns
+            self.grid_columnconfigure(i, weight=1, uniform="cols")
+
+        # Ensure equal row spacing
+        for i in range(5):  # Adjust based on your row count
+            self.grid_rowconfigure(i, weight=1)
+
+        '''
         # Create a single tooltip instance for the container
         tooltip = ToolTip(self)
 
@@ -2115,152 +2449,212 @@ class CaliperROIPane(ToolbarPane):
         for widget, text in tooltips.items():
             tooltip.register(widget, text)
 
-    def resize_img(self, img_path):
-        """Resize an image for use with tkinter buttons."""
+    def resize_img(self, img_path, width=50, height=50):  # Match BUTTON_WIDTH and BUTTON_HEIGHT
         img = Image.open(img_path)
-        resized_image = img.resize((30, 30), Image.LANCZOS)
-        return ImageTk.PhotoImage(resized_image)
+        resized_image = img.resize((width, height), Image.LANCZOS)
+        tk_image = ctk.CTkImage(resized_image, size=(width, height))  # Ensure proper scaling
+        return tk_image
 
 class PlottingPane(ToolbarPane):
     def __init__(self, parent, model_vars: VtState):
-        super().__init__(parent, text="Show/Hide Traces", height=175, width=150)
+        super().__init__(parent, height=175, width=150)
         self.parent = parent
         self.model_vars = model_vars
+        sv = model_vars.toolbar.plotting
 
+        self.frame_label = ctk.CTkLabel(self, text="Region of Interest information", font=(default_font, 16, 'bold'), fg_color=frame_label_color, height=frame_label_height, text_color='white').grid(row=0, column=0, columnspan=4,padx=1,pady=1, sticky="nsew")
+       
         #self.pack(side=tk.LEFT, anchor=tk.N, padx=3, fill=tk.Y)
-
+        pady=3
+        padx=3
         def rgb_to_hex(r, g, b):
             return f"#{r:02x}{g:02x}{b:02x}"
 
         cmap = CMAP.colors
         colours = [rgb_to_hex(*[int(c * 255) for c in colour]) for colour in cmap]
 
-        def add_button(text, colour, row, col=0):
-            button = tk.Button(self, text=text)
-            button.configure(bg=colour)
-            button.grid(row=row, column=col, pady=0, padx=2)
+        od_label = ctk.CTkLabel(self, text="OD", text_color="black", font=(default_font, default_font_size, "bold"))
+        od_label.grid(row=1, column=1, pady=0, padx=padx)
+
+        id_label = ctk.CTkLabel(self, text="ID", text_color="black", font=(default_font, default_font_size, "bold"))
+        id_label.grid(row=1, column=2, pady=0, padx=padx)
+
+        def add_Label(text, colour, row, col=0):
+            label = ctk.CTkLabel(self, text=text, text_color=colour, font=(default_font, default_font_size, "bold"))
+            label.grid(row=row+2, column=col, pady=pady, padx=padx)
+            return label
+        
+        def add_entry(i, color, row, col=1, text_variable=None):
+            entry = ctk.CTkEntry(self, text_color=color,textvariable=text_variable[i],  font=(default_font, default_font_size, "bold"),fg_color="white", justify='center', width=60, height=20)
+            entry.configure()
+            entry.grid(row=row+2, column=col, pady=pady, padx=padx)
+            return entry
+        
+        def add_button(text, colour, row, col=3):
+            button = ctk.CTkButton(self, text=text, font=(default_font, default_font_size), text_color=colour, width=70, height=25)
+            #button.configure(fg=colour)
+            button.grid(row=row+2, column=col, pady=pady, padx=padx)
             return button
+        
+
+        self.show_buttons = [
+            add_button(f"Show", colours[i], row=i)
+            for i in range(NUM_LINES)
+        ]
+
 
         self.line_buttons = [
-            add_button(f"Caliper/ROI {i+1}", colours[i], row=i)
+            add_Label(f"ROI {i+1}:", colours[i], row=i)
+            for i in range(NUM_LINES)
+        ]
+
+        self.roi_od_plot_entry = [
+            add_entry(i, colours[i], row=i, text_variable=sv.outer_diam_values)
+            for i in range(NUM_LINES)
+        ]
+
+        self.roi_id_plot_entry = [
+            add_entry(i, colours[i], row=i, col=2, text_variable=sv.inner_diam_values)
             for i in range(NUM_LINES)
         ]
 
 
     def update_button_states(self):
-        for i, button in enumerate(self.line_buttons):
+        for i, button in enumerate(self.show_buttons):
             state = self.model_vars.toolbar.plotting.line_show[i].get()
             try:
-                button_state = tk.SUNKEN if state else tk.RAISED
-                button.config(relief=button_state)
+                if state:
+                    button.configure(text="Hide")
+                else:
+                    button.configure(text='Show')
             except:
                 pass
 
+    
+
+    
 
 
 
 
 class DataAcquisitionPane(ToolbarPane):
     def __init__(self, parent, model_vars: VtState):
-        super().__init__(parent, text="Data Acquisition", height=400, width=400)
+        super().__init__(parent, height=400, width=400)
         self.model_vars = model_vars
         sv = model_vars.toolbar.data_acq
 
         self.pack(side=tk.LEFT, anchor=tk.N, padx=5, pady=5, fill=tk.Y)
+        self.frame_label = ctk.CTkLabel(self, text="Data Acquisition", font=(default_font, 16, 'bold'), fg_color=frame_label_color, height=frame_label_height, text_color='white').grid(row=0, column=0, columnspan=4,padx=1,pady=1, sticky="nsew")
 
         color_inner = '#{:02x}{:02x}{:02x}'.format(*C2)
         color_outer = '#{:02x}{:02x}{:02x}'.format(*C1)
         color_gray = '#{:02x}{:02x}{:02x}'.format(*C3)
         color_vt = '#{:02x}{:02x}{:02x}'.format(*C4)
 
+
+        entry_fg_color = "white"
+        entry_font_size = 18
+        entry_width = 100
+        justify = 'center'
+        padx = (0,30)
+
         # Configuring the grid
         for col in range(3):
             self.grid_columnconfigure(col, weight=1)
 
         # Labels for OD, ID, and Pressure
-        ttk.Label(self, text="OD (\u03bcm):", anchor="center").grid(row=0, column=0, padx=(5, 20), pady=5, sticky=tk.EW)
-        ttk.Label(self, text="ID (\u03bcm):", anchor="center").grid(row=0, column=1, padx=(20, 20), pady=5, sticky=tk.EW)
-        ttk.Label(self, text="Pressure (mmHg):", anchor="center").grid(row=0, column=2, padx=(20, 5), pady=5, sticky=tk.EW)
-
-        entry_width = 7
-        justify = 'center'
+        ctk.CTkLabel(self, text="OD (\u03bcm):", anchor="center", font=(default_font, default_font_size)).grid(row=1, column=0, padx=(20, 30), pady=0, sticky=tk.EW)
+        ctk.CTkLabel(self, text="ID (\u03bcm):", anchor="center", font=(default_font, default_font_size)).grid(row=1, column=1, padx=padx, pady=0, sticky=tk.EW)
+        ctk.CTkLabel(self, text="Pressure (mmHg):", anchor="center", font=(default_font, default_font_size)).grid(row=1, column=2, padx=padx, pady=0, sticky=tk.EW)
 
         # Recessed Entry for OD, ID, and Pressure
-        self.outer_diam_entry = tk.Entry(self, textvariable=sv.outer_diam, font=("Helvetica", 18, "bold"), justify=justify, width=entry_width, disabledforeground=color_outer, relief=tk.SUNKEN, state=tk.DISABLED)
-        self.outer_diam_entry.grid(row=1, column=0, padx=(5, 20), pady=5)
-        self.inner_diam_entry = tk.Entry(self, textvariable=sv.inner_diam, font=("Helvetica", 18, "bold"), justify=justify, width=entry_width, disabledforeground=color_inner, relief=tk.SUNKEN, state=tk.DISABLED)
-        self.inner_diam_entry.grid(row=1, column=1, padx=(20, 20), pady=5)
-        self.pressure_entry = tk.Entry(self, textvariable=sv.pressure, font=("Helvetica", 18, "bold"), justify=justify, width=entry_width, disabledforeground=color_vt, relief=tk.SUNKEN, state=tk.DISABLED)
-        self.pressure_entry.grid(row=1, column=2, padx=(20, 5), pady=5)
+        self.outer_diam_entry = ctk.CTkEntry(self, textvariable=sv.outer_diam, font=(default_font, entry_font_size, "bold"), justify=justify, width=entry_width, fg_color=entry_fg_color, text_color=color_outer, state=tk.DISABLED)
+        self.outer_diam_entry.grid(row=2, column=0, padx=(20, 30), pady=5)
+        self.inner_diam_entry = ctk.CTkEntry(self, textvariable=sv.inner_diam, font=(default_font, entry_font_size, "bold"), justify=justify, width=entry_width, fg_color=entry_fg_color, text_color=color_inner, state=tk.DISABLED)
+        self.inner_diam_entry.grid(row=2, column=1, padx=padx, pady=5)
+        self.pressure_entry = ctk.CTkEntry(self, textvariable=sv.pressure, font=(default_font, entry_font_size, "bold"), justify=justify, width=entry_width, fg_color=entry_fg_color, text_color=color_vt, state=tk.DISABLED)
+        self.pressure_entry.grid(row=2, column=2, padx=padx, pady=5)
 
         # Labels for OD %, Caliper μm, and Temp °C
-        ttk.Label(self, text="OD %", anchor="center").grid(row=2, column=0, padx=(5, 20), pady=5, sticky=tk.EW)
-        ttk.Label(self, text="Caliper μm", anchor="center").grid(row=2, column=1, padx=(20, 20), pady=5, sticky=tk.EW)
-        ttk.Label(self, text="Temp °C", anchor="center").grid(row=2, column=2, padx=(20, 5), pady=5, sticky=tk.EW)
+        ctk.CTkLabel(self, text="OD (%)", anchor="center", font=(default_font, default_font_size)).grid(row=3, column=0, padx=(20, 30), pady=0, sticky=tk.EW)
+        ctk.CTkLabel(self, text="Caliper (μm)", anchor="center", font=(default_font, default_font_size)).grid(row=3, column=1, padx=padx, pady=0, sticky=tk.EW)
+        ctk.CTkLabel(self, text="Temp (°C)", anchor="center", font=(default_font, default_font_size)).grid(row=3, column=2, padx=padx, pady=0, sticky=tk.EW)
 
         # Recessed Entry for Diameter (%), Caliper, and Temp
-        self.diam_percent_entry = tk.Entry(self, textvariable=sv.diam_percent, font=("Helvetica", 18, "bold"), justify=justify, width=entry_width, disabledforeground=color_outer, relief=tk.SUNKEN, state=tk.DISABLED)
-        self.diam_percent_entry.grid(row=3, column=0, padx=(5, 20), pady=5)
-        self.caliper_length_entry = tk.Entry(self, textvariable=sv.caliper_length, font=("Helvetica", 18, "bold"), justify=justify, width=entry_width, disabledforeground=color_gray, relief=tk.SUNKEN, state=tk.DISABLED)
-        self.caliper_length_entry.grid(row=3, column=1, padx=(20, 20), pady=5)
-        self.temperature_entry = tk.Entry(self, textvariable=sv.temperature, font=("Helvetica", 18, "bold"), justify=justify, width=entry_width, disabledforeground=color_gray, relief=tk.SUNKEN, state=tk.DISABLED)
-        self.temperature_entry.grid(row=3, column=2, padx=(20, 5), pady=5)
+        self.diam_percent_entry = ctk.CTkEntry(self, textvariable=sv.diam_percent, font=(default_font, entry_font_size, "bold"), justify=justify, fg_color=entry_fg_color, text_color=color_outer , width=entry_width, state=tk.DISABLED)
+        self.diam_percent_entry.grid(row=4, column=0, padx=(20,30), pady=5)
+        self.caliper_length_entry = ctk.CTkEntry(self, textvariable=sv.caliper_length, font=(default_font, entry_font_size, "bold"), justify=justify, fg_color=entry_fg_color, text_color=color_gray, width=entry_width, state=tk.DISABLED)
+        self.caliper_length_entry.grid(row=4, column=1, padx=padx, pady=5)
+        self.temperature_entry = ctk.CTkEntry(self, textvariable=sv.temperature, font=(default_font, entry_font_size, "bold"), justify=justify, fg_color=entry_fg_color, text_color=color_gray, width=entry_width, state=tk.DISABLED)
+        self.temperature_entry.grid(row=4, column=2, padx=padx, pady=5)
 
         # Label and Recessed Entry for Pressure countdown (s)
-        ttk.Label(self, text="Pressure countdown (s):", anchor="center").grid(row=0, column=3, padx=(5, 20), pady=5, sticky=tk.EW)
-        self.countdown_entry = tk.Entry(self, textvariable=sv.countdown, font=("Helvetica", 18, "bold"), justify=justify, width=entry_width, disabledforeground=color_gray, relief=tk.SUNKEN, state=tk.DISABLED)
-        self.countdown_entry.grid(row=1, column=3, padx=(5, 20), pady=5)
+        ctk.CTkLabel(self, text="Pressure countdown (s):", anchor="center", font=(default_font, default_font_size)).grid(row=1, column=3, padx=padx, pady=0, sticky=tk.EW)
+        self.countdown_entry = ctk.CTkEntry(self, textvariable=sv.countdown, font=(default_font, entry_font_size, "bold"), justify=justify, width=entry_width, fg_color=entry_fg_color, text_color=color_gray, state=tk.DISABLED)
+        self.countdown_entry.grid(row=2, column=3, padx=padx, pady=5)
 
         # Label and Recessed Entry for Time (s)
-        ttk.Label(self, text="Time (hh:mm:ss):", anchor="center").grid(row=2, column=3, padx=(5, 20), pady=5, sticky=tk.EW)
-        self.time_entry = tk.Entry(self, textvariable=sv.time_string, font=("Helvetica", 18, "bold"), justify=justify, width=entry_width, disabledforeground=color_gray, relief=tk.SUNKEN, state=tk.DISABLED)
-        self.time_entry.grid(row=3, column=3, padx=(5, 20), pady=5)
+        ctk.CTkLabel(self, text="Time (hh:mm:ss):", anchor="center", font=(default_font, default_font_size)).grid(row=3, column=3, padx=padx, pady=0, sticky=tk.EW)
+        self.time_entry = ctk.CTkEntry(self, textvariable=sv.time_string, font=(default_font, entry_font_size, "bold"), justify=justify, width=entry_width, fg_color=entry_fg_color, text_color=color_gray,  state=tk.DISABLED)
+        self.time_entry.grid(row=4, column=3,padx=padx, pady=5)
 
 
 
 class ImageDimensionsPane(ToolbarPane):
     def __init__(self, parent, model_vars: VtState):
-        super().__init__(parent, text="Image Dimensions", height=175, width=150)
+        super().__init__(parent, height=175, width=150)
         self.parent = parent
         self.model_vars = model_vars
         sv = model_vars.toolbar.image_dim
+        imagedimensions_entry_width = 100
 
         #self.pack(side=tk.LEFT, anchor=tk.N, padx=3, fill=tk.Y)
 
+        self.frame_label = ctk.CTkLabel(self, text="Image dimensions", font=(default_font, 16, 'bold'), fg_color=frame_label_color, height=frame_label_height, text_color='white').grid(row=0, column=0, columnspan=2,padx=1,pady=1, sticky="nsew")
+
+
         make_entry = make_entry_factory(self)
-        ttk.Label(self, text="Camera width:").grid(row=0, column=0, sticky=tk.E)
+        ctk.CTkLabel(self, text="Camera width:",  font=(default_font, default_font_size)).grid(row=1, column=0, sticky=tk.E)
         self.cam_width_entry = make_entry(
-            ttk.Entry,
+            ctk.CTkEntry,
             textvariable=sv.cam_width,
-            width=10,
-            row=0,
-            column=1,
-            disabled=True,
-        )
-        ttk.Label(self, text="Camera height:").grid(row=1, column=0, sticky=tk.E)
-        self.cam_height_entry = make_entry(
-            ttk.Entry,
-            textvariable=sv.cam_height,
-            width=10,
+            font=(default_font, default_font_size),
+            fg_color = entry_disabled_color,
+            width=imagedimensions_entry_width,
             row=1,
             column=1,
             disabled=True,
         )
-        ttk.Label(self, text="FOV width:").grid(row=2, column=0, sticky=tk.E)
-        self.fov_width_entry = make_entry(
-            ttk.Entry,
-            textvariable=sv.fov_width,
-            width=10,
+        ctk.CTkLabel(self, text="Camera height:", font=(default_font, default_font_size)).grid(row=2, column=0, sticky=tk.E)
+        self.cam_height_entry = make_entry(
+            ctk.CTkEntry,
+            textvariable=sv.cam_height,
+            font=(default_font, default_font_size),
+            fg_color = entry_disabled_color,
+            width=imagedimensions_entry_width,
             row=2,
             column=1,
             disabled=True,
         )
-        ttk.Label(self, text="FOV height:").grid(row=3, column=0, sticky=tk.E)
-        self.fov_height_entry = make_entry(
-            ttk.Entry,
-            textvariable=sv.fov_height,
-            width=10,
+        ctk.CTkLabel(self, text="FOV width:",  font=(default_font, default_font_size)).grid(row=3, column=0, sticky=tk.E)
+        self.fov_width_entry = make_entry(
+            ctk.CTkEntry,
+            textvariable=sv.fov_width,
+            font=(default_font, default_font_size),
+            fg_color = entry_disabled_color,
+            width=imagedimensions_entry_width,
             row=3,
+            column=1,
+            disabled=True,
+        )
+        ctk.CTkLabel(self, text="FOV height:",  font=(default_font, default_font_size)).grid(row=4, column=0, sticky=tk.E)
+        self.fov_height_entry = make_entry(
+            ctk.CTkEntry,
+            textvariable=sv.fov_height,
+            font=(default_font, default_font_size),
+            fg_color = entry_disabled_color,
+            width=imagedimensions_entry_width,
+            row=4,
             column=1,
             disabled=True,
         )
@@ -2268,7 +2662,7 @@ class ImageDimensionsPane(ToolbarPane):
 
 class ServoSettingsPane(ToolbarPane):
     def __init__(self, parent, model_vars: VtState):
-        super().__init__(parent, text="Pressure Settings", height=175, width=150)
+        super().__init__(parent, height=175, width=150)
         self.parent = parent
         self.model_vars = model_vars
         sv = model_vars.toolbar.servo
@@ -2280,11 +2674,13 @@ class ServoSettingsPane(ToolbarPane):
         self.ao_options = ["", "ao0", "ao1", "ao2"]
 
         # Add a label to display PyDAQmx availability
-        self.pydaqmx_status_label = ttk.Label(self, text=f"PyDAQmx Available: {is_pydaqmx_available}")
+
+
+        self.pydaqmx_status_label = ctk.CTkLabel(self, text=f"PyDAQmx Available: {is_pydaqmx_available}", font=(default_font, default_font_size))
         self.pydaqmx_status_label.grid(row=0, column=0, columnspan=2)
 
         # Device option menu
-        ttk.Label(self, text="Device").grid(row=1, column=0, sticky=tk.E)
+        ctk.CTkLabel(self, text="Device", font=(default_font, default_font_size)).grid(row=1, column=0, sticky=tk.E, )
         self.dev_entry = make_entry(
             ttk.OptionMenu,
             args=(
@@ -2297,7 +2693,7 @@ class ServoSettingsPane(ToolbarPane):
         )
 
         # AO channel option menu
-        ttk.Label(self, text="ao channel:").grid(row=2, column=0, sticky=tk.E)
+        ctk.CTkLabel(self, text="ao channel:", font=(default_font, default_font_size)).grid(row=2, column=0, sticky=tk.E)
         self.ao_entry = make_entry(
             ttk.OptionMenu,
             args=(
@@ -2331,59 +2727,71 @@ class ServoSettingsPane(ToolbarPane):
 
 class PressureControlPane(ToolbarPane):
     def __init__(self, parent, model_vars: VtState):
-        super().__init__(parent, text="Pressure Control (mmHg)", height=175, width=150)
+        super().__init__(parent, height=400, width=400)
         self.parent = parent
         self.model_vars = model_vars
         sv = model_vars.toolbar.pressure_protocol
 
         self.pack(side=tk.LEFT, anchor=tk.N, padx=5, pady=5, fill=tk.Y)
+        self.frame_label = ctk.CTkLabel(self, text="Pressure control (mmHg)", font=(default_font, 16, 'bold'), fg_color=frame_label_color, height=frame_label_height, text_color='white').grid(row=0, column=0, columnspan=4,padx=1,pady=1, sticky="nsew")
 
-        entry_width = 7
         justify = 'center'
+        BUTTON_HEIGHT = 30
+        BUTTON_WIDTH = 30
+
+        padx=(5,1)
+        pady=0
 
         # Scale for pressure increment
 
-        self.pressure_connect_img = self.resize_img2(os.path.join(images_folder, 'Connect Button Black.png'))
-        self.pressure_connect_button = ttk.Button(self, image=self.pressure_connect_img)
-        self.pressure_connect_button.grid(row=0, column=0, padx=2, pady=2)
+        self.pressure_connect_img = self.resize_img(os.path.join(images_folder, 'Connect Button Black.png'),  BUTTON_WIDTH, BUTTON_HEIGHT)
+        self.pressure_connect_button = ctk.CTkButton(self, image=self.pressure_connect_img, text="", height=BUTTON_HEIGHT, width=BUTTON_WIDTH)
+        self.pressure_connect_button.grid(row=1, column=0, padx=padx, pady=(8,0))
         self.pressure_connect_button.image = self.pressure_connect_img  # Keep a reference
 
-        self.pressure_start_img = self.resize_img2(os.path.join(images_folder, 'Pressure Step Button-01.png'))
-        self.start_protocol_button = ttk.Button(self, image=self.pressure_start_img, state=tk.DISABLED)
-        self.start_protocol_button.grid(row=0, column=1, padx=2, pady=2)
-        self.start_protocol_button.image = self.pressure_start_img  # Keep a reference
-
-        self.pressure_stop_img = self.resize_img2(os.path.join(images_folder, 'Pressure Step Button.png'))
-        self.pressure_stop_img.image = self.pressure_stop_img  # Keep a reference
-
-        self.set_pressure_img = self.resize_img2(os.path.join(images_folder, 'Pressure Start Button-01.png'))
-        self.set_pressure_button = ttk.Button(self, image=self.set_pressure_img, state=tk.DISABLED)
-        self.set_pressure_button.grid(row=0, column=2, padx=2, pady=2)
-        self.set_pressure_button.image = self.set_pressure_img  # Keep a reference
-
-        self.pressure_settings_img = self.resize_img2(os.path.join(images_folder, 'Settings Button Black.png'))
-        self.pressure_settings_button = ttk.Button(self, image=self.pressure_settings_img)
-        self.pressure_settings_button.grid(row=0, column=3, padx=2, pady=2)
+        self.pressure_settings_img = self.resize_img(os.path.join(images_folder, 'Settings Button Black.png'),  BUTTON_WIDTH, BUTTON_HEIGHT)
+        self.pressure_settings_button = ctk.CTkButton(self, image=self.pressure_settings_img, text="", height=BUTTON_HEIGHT, width=BUTTON_HEIGHT)
+        self.pressure_settings_button.grid(row=1, column=1, padx=(5,5), pady=(8,0))
         self.pressure_settings_button.image = self.pressure_settings_img  # Keep a reference
 
-        ttk.Label(self, text="Manual control:").grid(row=1, column=0, columnspan=2, sticky=tk.EW)
+        self.pressure_start_img = self.resize_img(os.path.join(images_folder, 'Pressure Step Button-01.png'),  BUTTON_WIDTH, BUTTON_HEIGHT)
+        self.start_protocol_button = ctk.CTkButton(self, image=self.pressure_start_img, text="", height=BUTTON_HEIGHT, width=BUTTON_WIDTH, fg_color="#BDC3C7", state=tk.DISABLED)
+        self.start_protocol_button.grid(row=1, column=2, padx=padx, pady=(8,0))
+        self.start_protocol_button.image = self.pressure_start_img  # Keep a reference
+
+        self.pressure_stop_img = self.resize_img(os.path.join(images_folder, 'Pressure Step Button.png'),  BUTTON_WIDTH, BUTTON_HEIGHT)
+        self.pressure_stop_img.image = self.pressure_stop_img  # Keep a reference
+
+        self.set_pressure_img = self.resize_img(os.path.join(images_folder, 'Pressure Start Button-01.png'),  BUTTON_WIDTH, BUTTON_HEIGHT)
+        self.set_pressure_button = ctk.CTkButton(self, image=self.set_pressure_img, text="", height=BUTTON_HEIGHT, width=BUTTON_WIDTH, fg_color="#BDC3C7", state=tk.DISABLED)
+        self.set_pressure_button.grid(row=1, column=3, padx=padx, pady=(8,0))
+        self.set_pressure_button.image = self.set_pressure_img  # Keep a reference
+
+
+
+        ctk.CTkLabel(self, text="Manual control:", font=(default_font, default_font_size)).grid(row=2, column=0, columnspan=4, sticky=tk.W)
 
         # Recessed Entry
-        self.outer_diam_entry = tk.Entry(self, textvariable=sv.set_pressure, font=("Helvetica", 18, "bold"), justify=justify, width=entry_width, relief=tk.SUNKEN, state=tk.DISABLED)
-        self.outer_diam_entry.grid(row=2, column=1, padx=(5, 5), pady=0, columnspan=2)  # Span two columns
+        self.outer_diam_entry = ctk.CTkEntry(self, font=(default_font, 20), textvariable=sv.set_pressure, justify=justify, width=100, fg_color=entry_disabled_color, state=tk.DISABLED)
+        self.outer_diam_entry.grid(row=3, column=1, columnspan=2)  # Span two columns
 
-        self.minus_img = self.resize_img(os.path.join(images_folder, 'Subtract Button Black.png'))
-        self.minus_button = tk.Button(self, image=self.minus_img, relief=tk.FLAT)
-        self.minus_button.grid(row=2, column=0, padx=2, pady=2)
+        self.minus_img = self.resize_img(os.path.join(images_folder, 'Subtract Button Black.png'), BUTTON_WIDTH, BUTTON_HEIGHT)
+        self.minus_button = ctk.CTkButton(self, image=self.minus_img, text="", height=BUTTON_HEIGHT, width=BUTTON_WIDTH)
+        self.minus_button.grid(row=3, column=0, padx=padx, pady=pady)
         self.minus_button.image = self.minus_img  # Keep a reference
 
-        self.add_img = self.resize_img(os.path.join(images_folder, 'Add Button Black.png'))
-        self.add_button = tk.Button(self, image=self.add_img, relief=tk.FLAT)
-        self.add_button.grid(row=2, column=3, padx=2, pady=2)
+        self.add_img = self.resize_img(os.path.join(images_folder, 'Add Button Black.png'), BUTTON_WIDTH, BUTTON_HEIGHT)
+        self.add_button = ctk.CTkButton(self, image=self.add_img, text="", height=BUTTON_HEIGHT, width=BUTTON_WIDTH,)
+        self.add_button.grid(row=3, column=3, padx=(5,5), pady=pady)
         self.add_button.image = self.add_img  # Keep a reference
 
-        self.pressure_increment_entry = tk.Scale(self, from_=1, to=20, resolution=1, orient=tk.HORIZONTAL, variable=sv.pressure_increment, showvalue=True)
-        self.pressure_increment_entry.grid(row=3, column=1, columnspan=2)  # Span two columns
+        ctk.CTkLabel(self, text="Increment change:", font=(default_font, default_font_size)).grid(row=4, column=0, columnspan=4, sticky=tk.W)
+
+        self.pressure_increment_entry = ctk.CTkSlider(self, from_=1, to=20, variable=sv.pressure_increment, width=120)
+        self.pressure_increment_entry.grid(row=5, column=0, padx=padx, columnspan=2)  # Span two columns
+
+        self.slider_value_entry = ctk.CTkEntry(self, textvariable=sv.pressure_increment, justify=justify, width=40,font=(default_font,20), fg_color=entry_disabled_color, state=tk.DISABLED)
+        self.slider_value_entry.grid(row=5, column=2, padx=padx, columnspan=2, sticky="w")  # Span two columns
 
         self.model_vars.app.auto_pressure.trace_add(
             "write", lambda *args: self.start_protocol_button_state_callback()
@@ -2391,11 +2799,11 @@ class PressureControlPane(ToolbarPane):
 
 
         # Button for setting pressure
-        #self.set_pressure_button = ttk.Button(self, text="Set Pressure")
+        #self.set_pressure_button = ctk.CTkButton(self, text="Set Pressure")
         #self.set_pressure_button.grid(row=2, column=1, sticky=tk.W)
 
         # Buttons for starting and stopping the pressure protocol
-        #self.start_protocol_button = ttk.Button(self, text="Start Protocol")
+        #self.start_protocol_button = ctk.CTkButton(self, text="Start Protocol")
         #self.start_protocol_button.grid(row=2, column=2, sticky=tk.E)
         
         # Create a single tooltip instance for the container
@@ -2419,21 +2827,15 @@ class PressureControlPane(ToolbarPane):
         running = self.model_vars.app.auto_pressure.get()
         if running:
             self.start_protocol_button.configure(image=self.pressure_stop_img)
-            self.set_pressure_button.configure(state=tk.DISABLED)
+            self.set_pressure_button.configure(state=tk.DISABLED, fg_color="#BDC3C7")
         else:
             self.start_protocol_button.configure(image=self.pressure_start_img)
-            self.set_pressure_button.configure(state=tk.NORMAL)
+            self.set_pressure_button.configure(state=tk.NORMAL, fg_color="white")
 
-    def resize_img(self, img_path):
+    def resize_img(self, img_path, width=50, height=50):  # Match BUTTON_WIDTH and BUTTON_HEIGHT
         img = Image.open(img_path)
-        resized_image = img.resize((22, 22), Image.LANCZOS)
-        tk_image = ImageTk.PhotoImage(resized_image)
-        return tk_image
-
-    def resize_img2(self, img_path):
-        img = Image.open(img_path)
-        resized_image = img.resize((30, 30), Image.LANCZOS)
-        tk_image = ImageTk.PhotoImage(resized_image)
+        resized_image = img.resize((width, height), Image.LANCZOS)
+        tk_image = ctk.CTkImage(resized_image, size=(width, height))  # Ensure proper scaling
         return tk_image
 
     def set_lock_state(self, state=tk.DISABLED):
@@ -2473,50 +2875,66 @@ large_font = ('Helvetica', 14)
 
 class PressureProtocolPane(ToolbarPane):
     def __init__(self, parent, model_vars: VtState):
-        super().__init__(parent, text="Configure Pressure Protocol")
+        super().__init__(parent)
         self.parent = parent
         self.model_vars = model_vars
         sv = model_vars.toolbar.pressure_protocol
+        pressure_entry_width = 50
+        padx = 10
+
+        self.frame_label = ctk.CTkLabel(self, text="Pressure protocol settings", font=(default_font, 16, 'bold'), fg_color=frame_label_color, height=frame_label_height, text_color='white').grid(row=0, column=0, columnspan=2,padx=1,pady=1, sticky="nsew")
 
         # Adjusted the layout to not specify height and width here
-        # self.pack(side=tk.LEFT, anchor=tk.N, padx=5, pady=5, fill=tk.BOTH, expand=True)
+        
 
         make_entry = make_entry_factory(self)
-        ttk.Label(self, text="Start (mmHg):").grid(row=0, column=0, sticky=tk.E, padx=10, pady=5)
+        ctk.CTkLabel(self, text="Start (mmHg):", font=(default_font, default_font_size)).grid(row=1, column=0, sticky=tk.E, padx=10, pady=5)
         self.pressure_start_entry = make_entry(
-            tk.Entry,
+            ctk.CTkEntry,
             textvariable=sv.pressure_start,
-            width=10,  # Increased width
-            row=0,
-            disabled=False,
-        )
-        ttk.Label(self, text="Stop (mmHg):").grid(row=1, column=0, sticky=tk.E, padx=10, pady=5)
-        self.pressure_stop_entry = make_entry(
-            tk.Entry,
-            textvariable=sv.pressure_stop,
-            width=10,  # Increased width
+            font=(default_font, default_font_size),
             row=1,
+            width=pressure_entry_width,
+            fg_color = "white",
+            padx=padx,
             disabled=False,
         )
-        ttk.Label(self, text="Intvl (mmHg):").grid(row=2, column=0, sticky=tk.E, padx=10, pady=5)
-        self.pressure_intvl_entry = make_entry(
-            tk.Entry,
-            textvariable=sv.pressure_intvl,
-            width=10,  # Increased width
+        ctk.CTkLabel(self, text="Stop (mmHg):", font=(default_font, default_font_size)).grid(row=2, column=0, sticky=tk.E, padx=10, pady=5)
+        self.pressure_stop_entry = make_entry(
+            ctk.CTkEntry,
+            textvariable=sv.pressure_stop,
+            font=(default_font, default_font_size),
             row=2,
+            width=pressure_entry_width,
+            fg_color = "white",
+            padx=padx,
             disabled=False,
         )
-        ttk.Label(self, text="Intvl (s):").grid(row=3, column=0, sticky=tk.E, padx=10, pady=5)
-        self.time_intvl_entry = make_entry(
-            tk.Entry,
-            textvariable=sv.time_intvl,
-            width=10,  # Increased width
+        ctk.CTkLabel(self, text="Intvl (mmHg):", font=(default_font, default_font_size)).grid(row=3, column=0, sticky=tk.E, padx=10, pady=5)
+        self.pressure_intvl_entry = make_entry(
+            ctk.CTkEntry,
+            textvariable=sv.pressure_intvl,
+            font=(default_font, default_font_size),
             row=3,
+            width=pressure_entry_width,
+            fg_color = "white",
+            padx=padx,
+            disabled=False,
+        )
+        ctk.CTkLabel(self, text="Intvl (s):",font=(default_font, default_font_size)).grid(row=4, column=0, sticky=tk.E, padx=10, pady=5)
+        self.time_intvl_entry = make_entry(
+            ctk.CTkEntry,
+            textvariable=sv.time_intvl,
+            font=(default_font, default_font_size),
+            row=4,
+            width=pressure_entry_width,
+            fg_color = "white",
+            padx=padx,
             disabled=False,
         )
 
-        self.hold_pressure_entry = ttk.Checkbutton(self, text="Hold final pressure", variable=sv.hold_pressure)
-        self.hold_pressure_entry.grid(row=4, column=0, padx=0, pady=0, sticky=tk.W)
+        self.hold_pressure_entry = ctk.CTkCheckBox(self, text="Hold final pressure", font=(default_font, default_font_size), variable=sv.hold_pressure, checkbox_height=20, checkbox_width=20)
+        self.hold_pressure_entry.grid(row=5, column=0, padx=10, pady=(0,10), columnspan=2, sticky=tk.NS)
 
         # Make the container expandable
         for i in range(4):  # Assuming 4 rows
@@ -2566,33 +2984,39 @@ class PressureProtocolPane(ToolbarPane):
 
 class StartStopPane(ToolbarPane):
     def __init__(self, parent, model_vars: VtState):
-        super().__init__(parent, text="Start/Stop", height=175, width=150)
+        super().__init__(parent)
         self.parent = parent
         self.model_vars = model_vars
         sv = model_vars.toolbar.start_stop
+        BUTTON_WIDTH = 60
+        BUTTON_HEIGHT = 60
+        # Set explicit width and height
+        #self.configure(width=800, height=175)
+        #self.pack_propagate(False)  # Prevents shrinking to fit children
+        self.frame_label = ctk.CTkLabel(self, text="Start / Stop", font=(default_font, 16, 'bold'), fg_color=frame_label_color, height=frame_label_height, text_color='white').grid(row=0, column=0, columnspan=4,padx=1,pady=1, sticky="nsew")
 
-        NSEW = tk.N + tk.S + tk.E + tk.W
+        # Pack this frame inside the parent
         self.pack(side=tk.LEFT, anchor=tk.CENTER, padx=5, pady=5, fill=tk.Y)
 
-        self.camera_on_img = self.resize_img(os.path.join(images_folder, 'Camera_button_on.png'))
-        self.camera_off_img = self.resize_img(os.path.join(images_folder, 'Camera_button_off.png'))
+        self.camera_on_img = self.resize_img(os.path.join(images_folder, 'Camera_button_on.png'), BUTTON_WIDTH, BUTTON_HEIGHT)
+        self.camera_off_img = self.resize_img(os.path.join(images_folder, 'Camera_button_off.png'), BUTTON_WIDTH, BUTTON_HEIGHT)
 
-        self.start_button = ttk.Button(self, image=self.camera_on_img)#, compound='top')#text="Snapshot",
-        self.start_button.grid(row=0, column=0, pady=0)#, sticky="nsew")
+        self.start_button =ctk.CTkButton(self, image=self.camera_on_img, width=50, text="")#, compound='top')#text="Snapshot",
+        self.start_button.grid(row=1, column=0, padx=5, pady=8)#, sticky="nsew")
 
-        self.tracking_on_img = self.resize_img(os.path.join(images_folder, 'Tracking_button_on.png'))
-        self.tracking_off_img = self.resize_img(os.path.join(images_folder, 'Tracking_button_off.png'))
+        self.tracking_on_img = self.resize_img(os.path.join(images_folder, 'Tracking_button_on.png'), BUTTON_WIDTH, BUTTON_HEIGHT)
+        self.tracking_off_img = self.resize_img(os.path.join(images_folder, 'Tracking_button_off.png'), BUTTON_WIDTH, BUTTON_HEIGHT)
 
-        self.track_button = ttk.Button(self, image=self.tracking_on_img)#, compound='top')#text="Snapshot",
-        self.track_button.grid(row=0, column=1, pady=0)#, sticky="nsew")
+        self.track_button = ctk.CTkButton(self, image=self.tracking_on_img, width=50, text="")#, compound='top')#text="Snapshot",
+        self.track_button.grid(row=1, column=1, padx=5, pady=8)#, sticky="nsew")
 
-        self.snapshot_image = self.resize_img(os.path.join(images_folder, 'Snapshot_Icon.png'))
+        self.snapshot_image = self.resize_img(os.path.join(images_folder, 'Snapshot_Icon.png'), BUTTON_WIDTH, BUTTON_HEIGHT)
 
-        self.snapshot_button = ttk.Button(self, image=self.snapshot_image)#, compound='top')#text="Snapshot",
-        self.snapshot_button.grid(row=0, column=2, pady=0)#, sticky="nsew")
+        self.snapshot_button = ctk.CTkButton(self, image=self.snapshot_image, width=50, text="")#, compound='top')#text="Snapshot",
+        self.snapshot_button.grid(row=1, column=2, padx=5, pady=8)#, sticky="nsew")
 
-        self.record_button = ttk.Checkbutton(self, variable=sv.record, text="Record Camera")
-        self.record_button.grid(row=1, column=0, columnspan=3, pady=10, sticky="nsew")
+        self.record_button = ctk.CTkSwitch(self, variable=sv.record, text="Record Camera", font=(default_font, default_font_size), switch_height=20, switch_width=40, border_width=2, border_color="#203C57")
+        self.record_button.grid(row=2, column=0, columnspan=3, padx=5, pady=5, sticky="NS")
 
         self.model_vars.app.acquiring.trace_add(
             "write", lambda *args: self.start_button_state_callback()
@@ -2617,10 +3041,10 @@ class StartStopPane(ToolbarPane):
             tooltip.register(widget, text)
 
 
-    def resize_img(self, img_path):
+    def resize_img(self, img_path, width=50, height=50):  # Match BUTTON_WIDTH and BUTTON_HEIGHT
         img = Image.open(img_path)
-        resized_image = img.resize((60, 60), Image.LANCZOS)
-        tk_image = ImageTk.PhotoImage(resized_image)
+        resized_image = img.resize((width, height), Image.LANCZOS)
+        tk_image = ctk.CTkImage(resized_image, size=(width, height))  # Ensure proper scaling
         return tk_image
 
     def record_button_state_callback(self):
@@ -2630,7 +3054,9 @@ class StartStopPane(ToolbarPane):
 
     def start_button_state_callback(self):
         running = self.model_vars.app.acquiring.get()
-        if running:
+        if self.model_vars.camera.camera_name == "Image from file":
+            self.start_button.configure(image=self.camera_on_img)
+        elif running:
             self.start_button.configure(image=self.camera_off_img)
         else:
             self.start_button.configure(image=self.camera_on_img)
@@ -2643,8 +3069,9 @@ class StartStopPane(ToolbarPane):
             self.track_button.configure(image=self.tracking_on_img)
 
 
-class ToolbarView(ttk.Frame):
-    def __init__(self, parent, state):
+
+class ToolbarView(ctk.CTkFrame):
+    def __init__(self, parent, state, set_camera_callback):
         super().__init__(parent)
         # NOTE(cmo): The underscore is more to avoid shadowing from a parent
         # class than privatising the variable
@@ -2652,10 +3079,13 @@ class ToolbarView(ttk.Frame):
         super().__init__(parent)
         self._state = state
         self.panes: List[ToolbarPane] = []
+        self.set_camera_callback = set_camera_callback
+
+        print(f"AcquisitionSettingsPane received set_camera_callback: {self.set_camera_callback}")  # ✅ Debug print
 
 
         # Initialize and pack other panes with side='left' to align them to the left
-        self.acq = AcquisitionSettingsPane(self, state)
+        self.acq = AcquisitionSettingsPane(self, state, self.set_camera_callback)
         self.panes.append(self.acq)
         self.acq.pack(side='left', fill='y')
 
@@ -2768,58 +3198,79 @@ class Menus:
 
         help_menu = tk.Menu(self.menu_bar, tearoff=0)
         self.help_menu = help_menu
+        help_menu.add_command(label="The VasoTracker Band", command=self.play_band)
         help_menu.add_command(label="Boogie woogie")
         help_menu.add_separator()
         help_menu.add_command(label="Register")
         help_menu.add_command(label="User Guide")
-        help_menu.add_command(label="Contact")
         help_menu.add_command(label="About")
         help_menu.add_command(label="Update")
         # Add Pacman Launch Option
-        #help_menu.add_separator()
-        #help_menu.add_command(label="Waka Waka", command=self.launch_pacman)
+        help_menu.add_separator()
+        help_menu.add_command(label="Waka Waka", command=self.launch_pacman)
         # Add Pacman Launch Option
-        #help_menu.add_separator()
-        #help_menu.add_command(label="Peow Peow", command=self.launch_invaders)
+        help_menu.add_separator()
+        help_menu.add_command(label="Peow Peow", command=self.launch_invaders)
 
         self.menu_bar.add_cascade(label="File", menu=file_menu)
         self.menu_bar.add_cascade(label="Settings", menu=settings_menu)
         self.menu_bar.add_cascade(label="Notepad", menu=notepad_menu)
         self.menu_bar.add_cascade(label="Help", menu=help_menu)
-        self.root.config(menu=self.menu_bar)
+        self.root.configure(menu=self.menu_bar)
 
-    
-    
-    '''
     def launch_pacman(self):
-        # https://github.com/leerob/space-invaders
-        """Launch the Pacman game without affecting VasoTracker's working directory"""
-        main_folder = os.getcwd()  # Store the original working directory
-        pacman_folder = os.path.join(main_folder, "pacman")  # Pacman subfolder
-        pacman_script = os.path.join(pacman_folder, "pacman.py")  # If the main file is pacman.py
-
-
-        try:
-            # Launch Pacman with its correct working directory, but keep VasoTracker's directory unchanged
-            subprocess.Popen(["python", pacman_script], cwd=pacman_folder)
-        except Exception as e:
-            print(f"Error launching Pacman: {e}")
-
+        self.launch_game("pacman", "pacman.py")
 
     def launch_invaders(self):
-        """Launch the Pacman game without affecting VasoTracker's working directory"""
-        main_folder = os.getcwd()  # Store the original working directory
-        pacman_folder = os.path.join(main_folder, "space-invaders")  # Pacman subfolder
-        pacman_script = os.path.join(pacman_folder, "spaceinvaders.py")  # If the main file is pacman.py
-
-
+        self.launch_game("space-invaders", "spaceinvaders.py")
+    
+    def launch_game(self, game_name, script_name):
         try:
-            # Launch Pacman with its correct working directory, but keep VasoTracker's directory unchanged
-            subprocess.Popen(["python", pacman_script], cwd=pacman_folder)
-        except Exception as e:
-            print(f"Error launching Pacman: {e}")
-    '''
+            game_dir = get_resource_path(os.path.join(game_name))
+            script_path = os.path.join(game_dir, script_name)
 
+            print(f"Launching {game_name} from:")
+            print(" - Script:", script_path)
+            print(" - Dir:", game_dir)
+
+            original_cwd = os.getcwd()  # Store current directory
+
+            os.chdir(game_dir)  # Change working directory so relative asset paths work
+            sys.path.insert(0, game_dir)  # Allow local imports like `import board`
+
+            runpy.run_path(script_path, run_name="__main__")
+
+        except Exception as e:
+            print(f"Error launching {game_name}: {e}")
+
+        finally:
+            os.chdir(original_cwd)  # Always restore original working directory
+    
+    def play_band(self):
+        """Play a random MP3 song from the music/ folder in a background thread."""
+        def play_music_background():
+            # Initialize pygame mixer (if not already initialized)
+            if not pygame.mixer.get_init():
+                pygame.mixer.init()
+            # Prepare list of MP3 files in the music directory
+            music_dir = os.path.join(os.path.dirname(__file__), "music")
+            songs = [f for f in os.listdir(music_dir) if f.lower().endswith(".mp3")]
+            if not songs:
+                print("No MP3 files found in the music/ directory.")
+                return  # No music to play
+            # Choose a random song and load it
+            song_file = random.choice(songs)
+            song_path = os.path.join(music_dir, song_file)
+            pygame.mixer.music.load(song_path)
+            pygame.mixer.music.play()
+            # Keep thread alive until the music finishes playing
+            while pygame.mixer.music.get_busy():
+                pygame.time.Clock().tick(10)  # small delay to avoid busy-waiting
+            # Optional: uninitialize mixer to release audio device
+            pygame.mixer.quit()
+        
+        # Start the background thread for music playback (daemon=True so it exits with the app)
+        threading.Thread(target=play_music_background, daemon=True).start()
 '''
 GraphState, MeasureStore, GraphPaneState
 VtState: graph, measure
@@ -2858,12 +3309,45 @@ class GraphFrame(ttk.Frame):
         self.ax2_bg = self.figure.canvas.copy_from_bbox(self.ax2.bbox)
 
     def setup_widgets(self):
+        axis_color = VasoTracker_Blue #"black"
+        graph_color = "white"
+        graph_text_color = VasoTracker_Blue #"black"
         # Create a figure with two subplots (ax1 and ax2) stacked vertically
         self.figure, (self.ax1, self.ax2) = plt.subplots(2, 1)
+        self.figure.patch.set_facecolor("white")
 
         # Create separate axes for markers
         self.ax1_markers = self.ax1.twinx()
         self.ax2_markers = self.ax2.twinx()
+
+        # Set subplot backgrounds
+        self.ax1.set_facecolor(graph_color)
+        self.ax2.set_facecolor(graph_color)
+        self.ax1_markers.set_facecolor(axis_color)
+        self.ax2_markers.set_facecolor(axis_color)
+
+        # Make axis lines, ticks, and labels white
+        for ax in [self.ax1, self.ax2, self.ax1_markers, self.ax2_markers]:
+            ax.spines['bottom'].set_color(axis_color)
+            ax.spines['top'].set_color(axis_color)
+            ax.spines['left'].set_color(axis_color)
+            ax.spines['right'].set_color(axis_color)
+            ax.xaxis.label.set_color(graph_text_color)
+            ax.yaxis.label.set_color(graph_text_color)
+            ax.tick_params(colors=axis_color, which='both')
+
+            # Set font size and style for axis labels
+            ax.xaxis.label.set_fontsize(16)  # Change font size for x-axis label
+            ax.yaxis.label.set_fontsize(16)  # Change font size for y-axis label
+            ax.xaxis.label.set_fontname(default_font)  # Change font for x-axis label
+            ax.yaxis.label.set_fontname(default_font)  # Change font for y-axis label
+
+            # Set font size for ticks
+            for tick in ax.get_xticklabels() + ax.get_yticklabels():
+                tick.set_fontsize(12)  # Set font size for tick labels
+                tick.set_fontname(default_font)  # Set font for tick labels
+
+
 
         # Initialize empty plots for dynamic updating
         (self.od_avg,) = self.ax1.plot([], [], label='OD Avg')
@@ -2944,7 +3428,7 @@ class GraphFrame(ttk.Frame):
                 self.id_lines[i].set_color(f"C{i}")
                 self.ax2.draw_artist(self.id_lines[i])
 
-            #
+            
             #marker_coords = [state.od_avg.x[0], state.od_avg.x[len(state.od_avg.x) // 2], state.od_avg.x[-1]]
             #
             #for i, x in enumerate(marker_coords):
@@ -3109,6 +3593,7 @@ class GraphFrame(ttk.Frame):
 
 
     def clear_graph(self):
+
         state = self.state_vars.graph
         # Clear the lines and data in both subplots (ax1 and ax2)
         self.od_avg.set_xdata([])
@@ -3125,8 +3610,8 @@ class GraphFrame(ttk.Frame):
         # Clear the data stored in state variables
         state.od_avg.x = []
         state.od_avg.y = []
-        state.od_avg.x = []
-        state.od_avg.y = []
+        state.id_avg.x = []
+        state.id_avg.y = []
 
         for i in range(NUM_LINES):
             state.od_lines[i].x = []
@@ -3165,42 +3650,47 @@ class TableFrame(ttk.Frame):
     def setup_widgets(self):
         sv = self.state_vars.table
 
-        table_controls = ttk.Frame(self)
+        padx = 8
+
+        # Create a style instance
+        style = ttk.Style()
+        style.configure("Treeview.Heading", font=(default_font, 10, "bold"), foreground=VasoTracker_Blue)
+        style.configure("Treeview", font=(default_font, 10), foreground=VasoTracker_Blue)
+
+        table_controls = ctk.CTkFrame(self)
         self.table_controls = table_controls
         table_controls.grid(
             row=0, column=0, columnspan=5, sticky=tk.N + tk.S + tk.E + tk.W
         )
-        #ttk.Label(table_controls, text="Label:").grid(row=0, column=0)
-        self.label_entry = ttk.Entry(table_controls, width=20, textvariable=sv.label)
+        #ctk.CTkLabel(table_controls, text="Label:").grid(row=0, column=0)
+        self.label_entry = ctk.CTkEntry(table_controls, width=200, textvariable=sv.label, font=(default_font, default_font_size), fg_color="white")
         self.label_entry.grid(row=0, column=1)
-        self.add_button = ttk.Button(table_controls, text="Add")
-        self.add_button.grid(row=0, column=2)
+        self.add_button = ctk.CTkButton(table_controls, text="Add", font=(default_font, default_font_size), width=80, text_color="black")
+        self.add_button.grid(row=0, column=2, padx=padx)
 
-
-
-        ttk.Label(table_controls, text="Ref Diameter:").grid(
+        ctk.CTkLabel(table_controls, text="Ref Diameter:", font=(default_font, default_font_size)).grid(
             row=0, column=4, padx=(20, 0)
         )
-        self.ref_diam_entry = ttk.Entry(
-            table_controls, width=10, textvariable=sv.ref_diam
-        )
+        self.ref_diam_entry = ctk.CTkEntry(
+            table_controls, width=60, textvariable=sv.ref_diam, font=(default_font, default_font_size), fg_color=entry_disabled_color
+            )
         self.ref_diam_entry.grid(row=0, column=5)
         self.ref_diam_entry.configure(state=tk.DISABLED)
 
-        self.ref_button = ttk.Button(table_controls, text="Set ref")
-        self.ref_button.grid(row=0, column=6)
-
+        self.ref_button = ctk.CTkButton(table_controls, text="Set ref", font=(default_font, default_font_size), width=80, text_color="black")
+        self.ref_button.grid(row=0, column=6, padx=padx)
+        
         self.table = ttk.Treeview(self, show="headings")
         self.table["columns"] = sv.headers()
 
-        self.table.column("#0", width=20)
-        self.table.column("#", width=20)
+        self.table.column("#0", width=25)
+        self.table.column("#", width=25)
         self.table.column("Time", width=75, stretch=False)
         self.table.column("Label", width=200)
         self.table.column("OD", width=50)
         self.table.column("%OD ref", width=75)
         self.table.column("ID", width=50)
-        self.table.column("Caliper", width=50)
+        self.table.column("Caliper", width=75)
         self.table.column("Pavg", width=50)
         self.table.column("P1", width=50)
         self.table.column("P2", width=50)
@@ -3227,7 +3717,7 @@ class TableFrame(ttk.Frame):
         v_scrollbar.grid(row=1, column=2, sticky=tk.N + tk.S)
         v_scrollbar.configure(command=self.table.yview)
         self.table.grid(row=1, column=0, sticky=tk.N + tk.S + tk.E + tk.W)
-        self.table.config(yscrollcommand=v_scrollbar.set)
+        self.table.configure(yscrollcommand=v_scrollbar.set)
         self.grid_rowconfigure(0, weight=1, minsize=30)
         self.grid_rowconfigure(1, weight=9)
         self.grid_columnconfigure(1, weight=1)
@@ -3264,7 +3754,7 @@ def resize_image_to_fit(im: Image, width: int, height: int):
     return im.resize((int(curr_width * resize_ratio), int(curr_height * resize_ratio)))
 
 
-class CameraFrame(ttk.Frame):
+class CameraFrame(ctk.CTkFrame):
     def __init__(self, parent, state: VtState):
         super().__init__(parent)
         self.parent = parent
@@ -3273,7 +3763,7 @@ class CameraFrame(ttk.Frame):
         self.grid_propagate(False)
 
         # self.label_text = StringVar(value="y x z")
-        # ttk.Label(self, textvariable=self.label_text).pack()
+        # ctk.CTkLabel(self, textvariable=self.label_text).pack()
 
         # def update_text(event):
         #     self.label_text.set(f"{event.width} x {event.height}")
@@ -3293,27 +3783,62 @@ class CameraFrame(ttk.Frame):
         self.state_vars.cam_show.slider_change_state.trace_add("write", self.toggle_slider_state)
 
     def setup_widgets(self):
-        self.slider = Scale(self, from_=0, to=100-1, orient=tk.HORIZONTAL, length=100,tickinterval=np.floor(100/1), command=self.update_image_from_slider)
+        # Fix: Ensure number_of_steps is an integer
+        self.slider = tk.Scale(
+            self,
+            from_=0,
+            to=99,  # Equivalent to 100-1
+            orient=tk.HORIZONTAL,  # Fix: Correct parameter name
+            length=200,  # Controls slider width
+            resolution=1,  # Controls step size (1 ensures integer steps)
+            command=self.update_image_from_slider
+        )
         self.slider.pack(fill=tk.X, side=tk.BOTTOM)
-        self.slider.config(state='disabled')  # Initially disable the slider
+        self.slider.configure(state="disabled")  # Initially disable the slider
+
+        # Canvas setup
         self.canvas = tk.Canvas(self, background="gray")
         self.canvas.pack(fill=tk.BOTH, expand=True)
         self.canvas_image_id = None
 
     def update_image_from_slider(self, *args):
-        self.slider.config(state='normal')
+        """Updates the image based on the slider position."""
+        # Fix: Check if slider should be enabled before changing state
+        if self.slider.cget("state") == "disabled":
+            self.slider.configure(state="normal")
+
         current_value = self.slider.get()
-        self.state_vars.cam_show.slider_position_manual=current_value
-        if self.state_vars.camera.camera_name == "Image from file" and not self.state_vars.app.tracking.get():
-            self.state_vars.graph.vertical_indicator = current_value - self.state_vars.camera.max_frame_count + 1
+        self.state_vars.cam_show.slider_position_manual = current_value
+
+        '''
+        When loading from a file only show the vertical indicator on the graph when we are not tracking and not acquiring i.e., only after the analysis has ran.
+        '''
+        if self.state_vars.camera.camera_name == "Image from file":
+            if self.state_vars.app.acquiring.get() and self.state_vars.app.tracking_file.get() and not self.state_vars.app.tracking.get():
+                self.state_vars.graph.vertical_indicator = (current_value - self.state_vars.camera.max_frame_count + 1)
+            else:
+                self.state_vars.graph.vertical_indicator = None
         else:
             self.state_vars.graph.vertical_indicator = None
-        self.state_vars.graph.dirty.set(True)
+
+        '''
+        If we are running the analyis on an image from file, do NOT show the graph being plotted. After the analysis has run the graph is plotted.
+        The else statement ensures the vertical line indicator on the graph is also plotted and we can see it.
+        '''
+        if (self.state_vars.camera.camera_name == "Image from file" and self.state_vars.app.tracking.get()):
+            self.state_vars.graph.dirty.set(False)
+        else:
+            self.state_vars.graph.dirty.set(True)
+
         self.state_vars.cam_show.dirty.set(True)
+        
+        # Optional: Force UI update
+        self.canvas.update_idletasks()
 
     def updateValue(self, value):
         current_value = self.slider.get()
         current_value = int(value)
+
 
     def update_slider_length(self, *args):
         l = self.state_vars.toolbar.image_dim.file_length.get()
@@ -3326,10 +3851,12 @@ class CameraFrame(ttk.Frame):
         self.slider.config(tickinterval=tick_interval)
         self.state_vars.cam_show.slider_length_dirty.set(False)
 
+
     def update_slider(self, *args):
         #self.slider.config(state='normal')
         l = self.state_vars.camera.frame_count
         self.slider.set(l)
+        #print ("l == ",l)
         self.state_vars.cam_show.slider_position = l
         self.state_vars.cam_show.slider_dirty.set(False)
 
@@ -3338,15 +3865,17 @@ class CameraFrame(ttk.Frame):
 
     def toggle_slider(self, *args):
         if self.slider.cget('state') == 'disabled':
-            self.slider.config(state='normal', command=self.update_slider)  # Enable the slider and set the command callback
+            self.slider.configure(state='normal', command=self.update_slider)  # Enable the slider and set the command callback
         else:
-            self.slider.config(state='disabled', command="")  # Disable the slider and remove the command callback
+            self.slider.configure(state='disabled', command="")  # Disable the slider and remove the command callback
 
     def toggle_slider_state(self, *args):
-        if self.slider.cget('state') == 'disabled':
-            self.slider.config(state='normal')  # Enable the slider and set the command callback
+        if self.state_vars.camera.camera_name == "Image from file":
+            self.slider.configure(state='normal')
+        elif self.slider.cget('state') == 'disabled':
+            self.slider.configure(state='normal')  # Enable the slider and set the command callback
         else:
-            self.slider.config(state='disabled')  # Disable the slider and remove the command callback
+            self.slider.configure(state='disabled')  # Disable the slider and remove the command callback
 
 
 
@@ -3406,7 +3935,7 @@ class CameraFrame(ttk.Frame):
         y_centre = height // 2
         state.im_centre = (y_centre, x_centre)
 
-        tk_image = ImageTk.PhotoImage(image=resized)
+        tk_image = ImageTk.PhotoImage(resized)
         # NOTE(cmo): Need to assign this image to the class or it gets gc'd
         self.tk_image = tk_image
         if self.canvas_image_id is not None:
@@ -3434,9 +3963,9 @@ class CameraFrame(ttk.Frame):
         im_dirty.set(False)
 
 
-class View(ttk.Frame):
+class View(ctk.CTkFrame):
     def __init__(
-        self, root: tk.Tk, state: VtState, shutdown_callbacks: List[Callable[[], None]]
+        self, root: ctk.CTk, state: VtState, set_camera_callback, shutdown_callbacks: List[Callable[[], None]]
     ):
         super().__init__(root)
         self.root = root
@@ -3448,14 +3977,15 @@ class View(ttk.Frame):
 
         self.state_vars = state
         self.menus = Menus(root)
-        self.toolbar = ToolbarView(self, state)
+        self.toolbar = ToolbarView(self, state, set_camera_callback)
         self.graph = GraphFrame(self, state)
         self.table = TableFrame(self, state)
         self.camera = CameraFrame(self, state)
-        self.status_bar = ttk.Label(
+        self.status_bar = tk.Label(
             self,
             text="Thank you for using VasoTracker. To support us, please cite the latest VasoTracker release (click here for the paper).",
             relief="sunken",
+            anchor="w",
         )
 
         # Add a link to the status bar along the bottom
@@ -3529,12 +4059,7 @@ class View(ttk.Frame):
 
         def set_toolbar_min_height():
             root.update_idletasks()  # Forces layout update
-            print("Toolbar height after update:", self.toolbar.winfo_height())  # Should be correct now
             self.grid_rowconfigure(0, weight=2, minsize=self.toolbar.winfo_height(), uniform="row")
-
-        print()
-        print("Minimum size: ", self.toolbar.winfo_height())
-        print()
 
         # NOTE(cmo): Can't do this until the widget is drawn.
         root.after(100, set_toolbar_min_height)
@@ -3739,15 +4264,14 @@ class CameraController:
             state.roi_cleanup.append(new_addition)
             del state.multi_roi[key]
         elif self.mode == CameraInteractionMode.AddAutoCaliper:
-            to_check = self.state.raster_draw_state.autocaliper
-            if len(to_check) < NUM_LINES:
-                key = f"Caliper{len(state.autocaliper)-1}"
-                cal = state.autocaliper[key]
-                self.model.add_auto_caliper(
-                    *image_space_coords(cal.x1, cal.y1),
-                    *image_space_coords(cal.x2, cal.y2),
-                )
-
+            #to_check = self.state.raster_draw_state.autocaliper
+            #if len(to_check) < NUM_LINES:
+            key = f"Caliper{len(state.autocaliper)-1}"
+            cal = state.autocaliper[key]
+            self.model.add_auto_caliper(
+                *image_space_coords(cal.x1, cal.y1),
+                *image_space_coords(cal.x2, cal.y2),
+            )
             # NOTE(cmo): Cleanup canvas state
             state.roi_cleanup.append(cal)
             del state.autocaliper[key]
@@ -3770,7 +4294,7 @@ class Controller:
         self.model = Model(mmc, set_timeout=root.after)
         shutdown_callbacks = []
         shutdown_callbacks.append(self.model.get_shutdown_callback())
-        self.view = View(root, self.model.state, shutdown_callbacks=shutdown_callbacks)
+        self.view = View(root, self.model.state, self.set_camera, shutdown_callbacks=shutdown_callbacks)
         self.camera_controller = CameraController(self.model, self.view)
 
         # Instantiate the PressureController
@@ -3796,7 +4320,7 @@ class Controller:
         #output_path = self.get_output_filename()
         #self.model.setup_output_files(output_path=output_path)
 
-        if self.model.config.registration.register_flag == 0:
+        if self.model.configure.registration.register_flag == 0:
             # Prompt user to register
             # On successful registration:
             splash = VasoTrackerSplashScreen(root, self.update_settings)
@@ -3867,7 +4391,7 @@ class Controller:
     def bind_buttons(self):
         tb = self.view.toolbar
 
-        tb.acq.camera_entry.bind("<Configure>", lambda *args: self.set_camera())
+        #tb.acq.camera_entry.bind("<Configure>", lambda *args: self.set_camera())
 
         '''
         tb.acq.res_entry.bind(
@@ -3876,42 +4400,46 @@ class Controller:
         tb.acq.fov_entry.bind("<Configure>", lambda *args: self.set_camera_fov())
         '''
 
-        tb.graph.set_button.config(command=self.set_graph_lims)
-        tb.graph.default_button.config(command=self.model.set_default_graph_lims)
+        tb.graph.set_button.configure(command=self.set_graph_lims)
+        tb.graph.default_button.configure(command=self.model.set_default_graph_lims)
 
-        tb.caliper_roi.roi_button.config()
-        tb.caliper_roi.caliper_button.config()
+        tb.caliper_roi.roi_button.configure(command=self.delete_all_rois)
+        tb.caliper_roi.caliper_button.configure(command=self.delete_all_rois)
+
 
         # Single caliper/roi buttons
-        tb.caliper_roi.draw_roi_button.config(command=self.roi_manual_draw)
-        tb.caliper_roi.draw_caliper_button.config(command=self.caliper_manual_draw)
-        tb.caliper_roi.delete_roi_caliper_button.config(command=self.caliper_manual_delete)
+        tb.caliper_roi.draw_roi_button.configure(command=self.roi_manual_draw)
+        tb.caliper_roi.draw_caliper_button.configure(command=self.caliper_manual_draw)
+        tb.caliper_roi.delete_roi_caliper_button.configure(command=self.caliper_manual_delete)
 
         # Multi caliper/roi buttons
-        tb.caliper_roi.auto_add_button.config(command=self.caliper_auto_add)
-        tb.caliper_roi.auto_delete_button.config(command=self.caliper_auto_delete)
-        tb.caliper_roi.auto_delete_all_button.config(command=self.caliper_auto_delete_all)
-
+        tb.caliper_roi.auto_add_button.configure(command=self.caliper_auto_add)
+        tb.caliper_roi.auto_delete_button.configure(command=self.caliper_auto_delete)
+        tb.caliper_roi.auto_delete_all_button.configure(command=self.caliper_auto_delete_all)
+        
+        tb.caliper_roi.showtraces_button.configure(command=self.show_plotting_popup)
+        '''
         for i in range(NUM_LINES):
-            tb.plotting.line_buttons[i].config(command=partial(self.toggle_line, i))
+            tb.plotting.line_buttons[i].configure(command=partial(self.toggle_line, i))
+        '''
 
         if is_pydaqmx_available:
-            tb.pressure_control_settings.start_protocol_button.config(command=self.servo_start)
-            #tb.pressure_protocol_settings.stop_protocol_button.config(command=self.servo_stop)
-            tb.pressure_control_settings.add_button.config(command=self.increase_pressure)
-            tb.pressure_control_settings.minus_button.config(command=self.decrease_pressure)
+            tb.pressure_control_settings.start_protocol_button.configure(command=self.servo_start)
+            #tb.pressure_protocol_settings.stop_protocol_button.configure(command=self.servo_stop)
+            tb.pressure_control_settings.add_button.configure(command=self.increase_pressure)
+            tb.pressure_control_settings.minus_button.configure(command=self.decrease_pressure)
 
-        tb.start_stop.start_button.config(command=self.start_acq)
-        tb.start_stop.track_button.config(command=self.start_tracking)
-        #tb.start_stop.record_button.config(command=self.record_data)
-        tb.start_stop.snapshot_button.config(command=self.take_snapshot)
-        self.view.table.add_button.config(command=self.add_table_row)
-        self.view.table.ref_button.config(command=self.set_ref_diameter)
+        tb.start_stop.start_button.configure(command=self.start_acq)
+        tb.start_stop.track_button.configure(command=self.start_tracking)
+        #tb.start_stop.record_button.configure(command=self.record_data)
+        tb.start_stop.snapshot_button.configure(command=self.take_snapshot)
+        self.view.table.add_button.configure(command=self.add_table_row)
+        self.view.table.ref_button.configure(command=self.set_ref_diameter)
 
         if is_pydaqmx_available:
-            tb.pressure_control_settings.set_pressure_button.config(command=self.update_set_pressure)
-            tb.pressure_control_settings.pressure_connect_button.config(command=self.open_pressure_settings)
-            tb.pressure_control_settings.pressure_settings_button.config(command=self.open_pressure_protocol_settings)
+            tb.pressure_control_settings.set_pressure_button.configure(command=self.update_set_pressure)
+            tb.pressure_control_settings.pressure_connect_button.configure(command=self.open_pressure_settings)
+            tb.pressure_control_settings.pressure_settings_button.configure(command=self.open_pressure_protocol_settings)
 
 
     def bind_checkboxes(self):
@@ -3919,7 +4447,7 @@ class Controller:
         just boolean state updates."""
         tb = self.view.toolbar
 
-        tb.acq.default_settings.config(command=self.acq_set_default)
+        tb.acq.default_settings.configure(command=self.acq_set_default)
 
     def bind_menu_items(self):
         menu = self.view.menus
@@ -4001,8 +4529,11 @@ class Controller:
 
 
 
-    def set_camera(self):
-        cam_name = self.model.state.toolbar.acq.camera.get()
+    def set_camera(self, cam_name=None):
+        print("setting the camera...")
+        if cam_name is None:
+            cam_name = self.model.state.toolbar.acq.camera.get()
+        
         print("Camera name:", cam_name)
         self.model.set_camera(cam_name)
 
@@ -4036,6 +4567,7 @@ class Controller:
 
     def caliper_manual_draw(self):
         self.camera_controller.mode = CameraInteractionMode.SetCaliper
+        
 
     def caliper_manual_delete(self):
         try:
@@ -4054,6 +4586,7 @@ class Controller:
             self.camera_controller.mode = CameraInteractionMode.AddAutoCaliper
         elif self.model.state.toolbar.caliper_roi.roi_flag.get() == "ROI":
             self.camera_controller.mode = CameraInteractionMode.AddMultiRoi
+      
 
     def caliper_auto_delete(self):
         if self.model.state.toolbar.caliper_roi.roi_flag.get() == "Caliper":
@@ -4061,11 +4594,16 @@ class Controller:
         elif self.model.state.toolbar.caliper_roi.roi_flag.get() == "ROI":
             self.model.delete_most_recent_multi_roi()
 
+    def delete_all_rois(self):
+        self.model.delete_all_autocaliper()
+        self.model.delete_all_multi_roi()
+
     def caliper_auto_delete_all(self):
         if self.model.state.toolbar.caliper_roi.roi_flag.get() == "Caliper":
             self.model.delete_all_autocaliper()
         elif self.model.state.toolbar.caliper_roi.roi_flag.get() == "ROI":
             self.model.delete_all_multi_roi()
+
 
     def roi_single_draw(self):
         self.camera_controller.mode = CameraInteractionMode.SetRoi
@@ -4085,17 +4623,17 @@ class Controller:
         new_state = not prev_state
         button_state = tk.SUNKEN if new_state else tk.RAISED
 
-        self.view.toolbar.plotting.line_buttons[i].config(relief=button_state)
+        #self.view.toolbar.plotting.line_buttons[i].configure(relief=button_state)
         state.set(new_state)
         self.model.state.graph.dirty.set(True)
-
+        
         # Update button states in both PlottingPane instances
         self.view.toolbar.plotting.update_button_states()
         try: #If it exists
             self.menu_plotting_pane.update_button_states()  # Replace with actual reference
         except:
             pass
-
+        
     def servo_start(self):
         current_state = self.model.state.app.auto_pressure.get()
         if current_state == 0:
@@ -4133,41 +4671,60 @@ class Controller:
 
     def start_acq(self):
         current_state = self.model.state.app.acquiring.get()
-        if self.model.state.camera == None:
-            tmb.showwarning(
-                title="Warning",
-                message="You need to select your camera to show images!",
-            )
+        if self.model.state.camera.camera_name == "Image from file":
+            self.model.state.app.acquiring.set(True)
+            self.model.state.app.tracking.set(False)
         else:
-            self.model.state.app.acquiring.set(not current_state)
-        current_state = self.model.state.app.acquiring.get()
-        if current_state == 0:
-            self.model.state.app.tracking.set(current_state)
+            if self.model.state.camera == None:
+                tmb.showwarning(
+                    title="Warning",
+                    message="You need to select your camera to show images!",
+                )
+            else:
+                self.model.state.app.acquiring.set(not current_state)
+            current_state = self.model.state.app.acquiring.get()
+            if current_state == 0:
+                self.model.state.app.tracking.set(current_state)
+
 
 
     def start_tracking(self):
         if self.model.state.camera.camera_name == "Image from file":
+            '''
+            This ensure that when a file is loaded in tracking is set when the button is pressed.
+            '''
             self.setup_files()
-        if self.model.state.camera == None:
-            tmb.showwarning(
-                title="Warning",
-                message="You need to select your camera to show images!",
-            )
+            if self.model.state.app.tracking.get():
+                self.model.state.app.tracking.set(False)
+                self.model.state.app.acquiring.set(False)
+                self.model.state.app.file_analysed.set(0)
+            else:
+                #Rerun the analysis in the While acq code.
+                self.model.state.app.tracking.set(True)
+                self.model.state.app.acquiring.set(True)
+                self.model.state.app.file_analysed.set(0)
+                self.reset_model_variables()
         else:
-            if not self.output_path:
+            if self.model.state.camera == None:
                 tmb.showwarning(
                     title="Warning",
-                    message="You need to set up an output file (File -> New File).",
+                    message="You need to select your camera to show images!",
                 )
             else:
-                current_state = self.model.state.app.acquiring.get()
+                if not self.output_path:
+                    tmb.showwarning(
+                        title="Warning",
+                        message="You need to set up an output file (File -> New File).",
+                    )
+                else:
+                    current_state = self.model.state.app.acquiring.get()
 
-                if current_state == 0:
-                    self.model.state.app.acquiring.set(not current_state)
-                    current_time = time.time()
-                    self.model.start_time = current_time
-                current_state = self.model.state.app.tracking.get()
-                self.model.state.app.tracking.set(not current_state)
+                    if current_state == 0:
+                        self.model.state.app.acquiring.set(not current_state)
+                        current_time = time.time()
+                        self.model.start_time = current_time
+                    current_state = self.model.state.app.tracking.get()
+                    self.model.state.app.tracking.set(not current_state)
 
     def start_tracking_file(self):
         self.model.state.app.tracking_file.set(True)
@@ -4192,39 +4749,60 @@ class Controller:
         self.model.add_table_row()
 
     def update_set_pressure(self):
-
-
         new_pressure_value = self.model.state.toolbar.pressure_protocol.set_pressure.get()
         self.pressure_controller.adjust_pressure(new_pressure_value, update_table=True)
 
     def open_pressure_settings(self):
+        self.view.toolbar.pressure_control_settings.start_protocol_button.configure(state=tk.NORMAL)
+        self.view.toolbar.pressure_control_settings.start_protocol_button.configure(fg_color='white')
+        self.view.toolbar.pressure_control_settings.set_pressure_button.configure(state=tk.NORMAL)
+        self.view.toolbar.pressure_control_settings.set_pressure_button.configure(fg_color='white')
+
         self.show_daq_settings()
 
     def open_pressure_protocol_settings(self):
         self.show_pressure_settings()
 
+    def disable_buttons_on_file_load(self):
+        self.view.toolbar.start_stop.start_button.configure(state="disabled", fg_color=entry_disabled_color)
+        pass
+
+    def reset_model_variables(self):
+        self.model.start_time = 0.0
+        self.model.prev_update = 0.0
+        self.model.time_elapsed = 0.0
+        self.model.frame_count = 0
+        self.model.state.cam_show.slider_position_manual = 0
+        self.model.state.camera.reinitialize()
+        self.model.state.frames_elapsed = 0
+
     def menu_analyze_file(self):
         # TODO: Probably need to reset everything here.
+        # TODO: reset buttons to enabled after analysis ran
         self.model.state.toolbar.acq.camera.set("...")
         if tmb.askyesno("Load image file", message="Load file to analyze. Are you sure?"):
+            self.model.state.app.file_analysed.set(0) # Reset this
             self.model.state.app.tracking.set(False)
             self.model.setup_default_ui_state_loadfile()
             #self.model.state.camera.camera_name.set()
             self.model.state.toolbar.acq.camera.set("Image from file")
+            self.set_camera("Image from file")
+            #self.model.state.cam_show.slider_change_state.set(True)
             self.output_path = None
             self.output_path = self.get_output_filename()
+            #self.disable_buttons_on_file_load()
             self.setup_files()
             self.start_acq()
-            self.start_tracking()
+            #self.start_tracking()
             self.start_tracking_file()
             self.model.state.cam_show.slider_change_state.set(True)
-
 
     def setup_files(self):
         if self.output_path:
             self.model.setup_output_files(output_path=self.output_path)
             self.model.state.table.clear.set(True)
             self.model.state.graph.clear.set(True)
+            self.reset_model_variables()
 
 
     def menu_new_file(self):
@@ -4267,14 +4845,19 @@ class Controller:
                 "More details printed to console. App will now close.",
             )
             self.view.shutdown_app(force=True)
-
+    
     def update_settings(self, flag_name, value):
         config = self.model.to_config()
         # Use setattr to update the flag
-        setattr(self.model.config.registration, flag_name, value)
-        #self.model.config.registration.set_values(self.state)
-        self.model.config.save(override_path=self.model.config_path)
+        setattr(self.model.configure.registration, flag_name, value)
+        #self.model.configure.registration.set_values(self.state)
+        #self.model.configure.save(override_path=self.model.config_path)
 
+        """Get the path to a resource, whether it's bundled with PyInstaller or not."""
+        base_path = getattr(sys, '_MEIPASS', os.path.abspath("."))
+        self.model.configure.save(os.path.join(base_path, self.model.config_path))
+
+    
     def menu_save_settings(self):
         now = datetime.now()
         savename = now.strftime("%Y%m%d") + "_Settings"
@@ -4283,7 +4866,7 @@ class Controller:
         )
         if path == "":
             return
-
+        print("Saving settings to: ", path)
         self.model.to_config().save(override_path=path)
 
     def menu_exit(self):
@@ -4324,6 +4907,9 @@ class Controller:
         icon_path = os.path.join(images_folder, 'vt_icon.ICO')#Path(__file__).parent / "images" / "VasoTracker_Icon.ICO"
         popup.iconbitmap(icon_path)
 
+        # Ensure the popup window is non-resizable (if needed)
+        popup.resizable(False, False)
+
         #popup.geometry("400x300")  # Set the size of the popup window
         #popup.grab_set()  # Make the popup window modal
 
@@ -4342,6 +4928,9 @@ class Controller:
         # Set the window icon to be the same as the main window
         icon_path = os.path.join(images_folder, 'vt_icon.ICO')#Path(__file__).parent / "images" / "VasoTracker_Icon.ICO"
         popup.iconbitmap(icon_path)
+
+        # Ensure the popup window is non-resizable (if needed)
+        popup.resizable(False, False)
 
         #popup.geometry("400x300")  # Set the size of the popup window
         #popup.grab_set()  # Make the popup window modal
@@ -4363,6 +4952,9 @@ class Controller:
         icon_path = os.path.join(images_folder, 'vt_icon.ICO')#Path(__file__).parent / "images" / "VasoTracker_Icon.ICO"
         popup.iconbitmap(icon_path)
 
+        # Ensure the popup window is non-resizable (if needed)
+        popup.resizable(False, False)
+
         #popup.grab_set()  # Make the popup window modal
 
         # Add a descriptive label
@@ -4378,8 +4970,9 @@ class Controller:
         self.graph_axis_pane.grid(sticky="nsew")
 
         # Link the buttons in the popup to their functionality
-        self.graph_axis_pane.set_button.config(command=self.set_graph_lims)
-        self.graph_axis_pane.default_button.config(command=self.model.set_default_graph_lims)
+        self.graph_axis_pane.set_button.configure(command=self.set_graph_lims)
+        self.graph_axis_pane.default_button.configure(command=self.model.set_default_graph_lims)
+
 
     def show_plotting_popup(self):
         popup = tk.Toplevel(root)
@@ -4388,6 +4981,9 @@ class Controller:
         # Set the window icon to be the same as the main window
         icon_path = os.path.join(images_folder, 'vt_icon.ICO')#Path(__file__).parent / "images" / "VasoTracker_Icon.ICO"
         popup.iconbitmap(icon_path)
+
+        # Ensure the popup window is non-resizable (if needed)
+        popup.resizable(False, False)
 
         #popup.grab_set()  # Make the popup window modal
 
@@ -4402,35 +4998,48 @@ class Controller:
         # Create an instance of the PlottingFrame within the frame
         self.menu_plotting_pane = PlottingPane(frame, self.model.state)
         self.menu_plotting_pane.grid(sticky="nsew")
-
+        
         for i in range(NUM_LINES):
-           self.menu_plotting_pane.line_buttons[i].config(command=partial(self.toggle_line, i))
-
+           self.menu_plotting_pane.show_buttons[i].configure(command=partial(self.toggle_line, i))
+        
         # Update the button states to reflect the current model state
         self.menu_plotting_pane.update_button_states()
+        
 
 
     def show_daq_settings(self):
+        # Create the popup window
         popup = tk.Toplevel(root)
         popup.title("NI DAQ Settings:")
 
         # Set the window icon to be the same as the main window
-        icon_path = os.path.join(images_folder, 'vt_icon.ICO')#Path(__file__).parent / "images" / "VasoTracker_Icon.ICO"
+        icon_path = os.path.join(images_folder, 'vt_icon.ICO')  # Path to the icon file
         popup.iconbitmap(icon_path)
-
-        #popup.grab_set()  # Make the popup window modal
+        
+        # Ensure the popup window is non-resizable
+        popup.resizable(False, False)
 
         # Add a descriptive label
-        label = tk.Label(popup, text="Configure the National Instruments DAQ settings:")
+        label = ctk.CTkLabel(popup, text="Configure the National Instruments DAQ settings:", font=(default_font, default_font_size))
         label.pack()
 
         # Create a placeholder frame for PlottingFrame using grid()
         frame = tk.Frame(popup)
         frame.pack()
 
-        # Create an instance of the DAAQ Setings within the frame
+        # Create an instance of the DAQ Settings within the frame
         self.menu_plotting_pane = ServoSettingsPane(frame, self.model.state)
         self.menu_plotting_pane.grid(sticky="nsew")
+
+        # Ensure all the widgets are updated before showing the window
+        popup.update_idletasks()
+
+        # Make the popup window stay on top
+        popup.attributes('-topmost', True)
+
+        # Now show the window after everything is fully generated
+        popup.deiconify()
+
 
     def show_pressure_settings(self):
         popup = tk.Toplevel(root)
@@ -4439,6 +5048,9 @@ class Controller:
         # Set the window icon to be the same as the main window
         icon_path = os.path.join(images_folder, 'vt_icon.ICO')#Path(__file__).parent / "images" / "VasoTracker_Icon.ICO"
         popup.iconbitmap(icon_path)
+
+        # Ensure the popup window is non-resizable (if needed)
+        popup.resizable(False, False)
 
         #popup.grab_set()  # Make the popup window modal
 
@@ -4455,7 +5067,7 @@ class Controller:
         self.menu_plotting_pane.grid(sticky="nsew")
 
     def show_notepad(self):
-        if self.model.acquiring and self.model.notepad_path:
+        if self.model.notepad_path:
             popup = tk.Toplevel(root)
             popup.title("Notepad")
 
@@ -4478,7 +5090,7 @@ class Controller:
                 self.text_area.insert(tk.END, content)
             else:
                 # Prepopulate the text area with a header if the file doesn't exist
-                header = "We love VasoTracker, you love VasoTracker. Show your love and cite our all of papers. Even the ones you didn't read.\n" \
+                header = "We love VasoTracker, you love VasoTracker. Show your love and cite the papers. Even the ones you didn't read.\n" \
                         "------------------------------------\n" \
                         f"- Notes for experiment: {os.path.basename(self.output_path)}\n" \
                         "------------------------------------\n\n"
@@ -4501,6 +5113,141 @@ class Controller:
         """Automatically save the contents of the text area to a file."""
         with open(self.model.notepad_path, "w") as file:
             file.write(self.text_area.get("1.0", tk.END))
+
+
+
+
+
+
+
+import tkinter as tk
+from tkinter import font
+import os
+import sys
+import webbrowser
+from multiprocessing import freeze_support
+from PIL import Image, ImageTk
+
+def show_splash():
+    """Show the initial splash screen while the app loads."""
+    global rootsplash, splash_image_tk
+
+    rootsplash = tk.Toplevel()
+    rootsplash.overrideredirect(True)  # Remove title bar
+
+    width, height = rootsplash.winfo_screenwidth(), rootsplash.winfo_screenheight()
+
+    image_file = os.path.join(images_folder, 'Splash.gif')
+
+    with Image.open(image_file) as image:
+        new_width, new_height = int(width * 0.5), int(height * 0.5)
+        image = image.resize((new_width, new_height), Image.LANCZOS)
+        splash_image_tk = ImageTk.PhotoImage(image)
+
+    x_offset, y_offset = (width - new_width) // 2, (height - new_height) // 2
+    rootsplash.geometry(f"{new_width}x{new_height}+{x_offset}+{y_offset}")
+
+    canvas = tk.Canvas(rootsplash, width=new_width, height=new_height, highlightthickness=0)
+    canvas.pack()
+    canvas.create_image(0, 0, anchor="nw", image=splash_image_tk)
+
+    rootsplash.update()
+
+
+def show_registration_screen(controller):
+    """Show the VasoTracker registration splash screen and keep it on top."""
+    global registration_screen
+
+    registration_screen = VasoTrackerSplashScreen(root, controller.update_settings)  # Pass update_settings
+    registration_screen.splash_win.lift()
+    registration_screen.splash_win.attributes("-topmost", True)
+    registration_screen.splash_win.focus_force()
+
+
+    # Ensure main window remains hidden until registration is complete
+    root.wait_window(registration_screen.splash_win)
+
+    # Now that registration is done, show the main window
+    root.deiconify()
+
+def initialize_controller():
+    """Initialize the main application and check for registration."""
+    global app  
+    app = Controller(root, mmc)  # Initialize the controller (WITHOUT launching VasoTrackerSplashScreen)
+
+    rootsplash.destroy()  # Remove the loading splash screen
+
+    '''
+    # **Check if registration is required**
+    if app.model.configure.registration.register_flag == 0:
+        show_registration_screen(app)  # Show registration screen
+    else:
+        root.deiconify()  # If already registered, show the main window immediately
+    '''
+
+if __name__ == "__main__":
+    freeze_support()
+
+    # **Create Main Window but Keep it Hidden**
+    root = tk.Tk()
+    root.withdraw()  # Keep it hidden until registration is resolved
+    root.iconbitmap(os.path.join(images_folder, 'vt_icon.ICO'))
+    root.state("zoomed")
+
+    ctk.set_default_color_theme(gui_json_path)
+
+    # **Show Splash Screen**
+    show_splash()
+
+    # **Find MicroManager Path**
+    mm_path = find_micromanager()
+    print(mm_path)
+
+    if mm_path is None:
+        tmb.showinfo("Warning", "MicroManager not installed. Please download and install then relaunch VasoTracker.")
+        webbrowser.open_new("https://download.micro-manager.org/nightly/2.0/Windows/")
+        root.destroy()
+        sys.exit()
+    else:
+        mmc = CMMCorePlus(adapter_paths=[mm_path, SYS32_PATH, BASLER_PATH, BASLER_PATH2])
+
+    if not is_pydaqmx_available:
+        tmb.showinfo("Warning", "niDAQmx not found. Please install to enable automatic pressure control.")
+
+    # **Schedule Controller Initialization on the Main Thread (No Freezing)**
+    root.after(2000, initialize_controller)  # Start loading the app after splash screen
+
+    root.mainloop()  # Enter main event loop
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+'''
+
+
+
+
+
+
 ##################################################
 ## Splash screen
 ##################################################
@@ -4532,9 +5279,11 @@ rootsplash.mainloop()
 if __name__ == "__main__":
     freeze_support()
 
-    root = tk.Tk()
+    root = ctk.CTk()
     root.iconbitmap(os.path.join(images_folder, 'vt_icon.ICO'))
-    root.withdraw()
+    #root.withdraw()
+
+    ctk.set_default_color_theme("C:\\Users\\Calum\\Documents\\GitHub\\VasoTracker-2_GUI_new\\vasotracker 2.0\\VasoTrackerblue.json")
 
     mm_path = find_micromanager()
 
@@ -4553,24 +5302,31 @@ if __name__ == "__main__":
     if not is_pydaqmx_available:
         tmb.showinfo("Warning", "niDAQmx not found. Please install to enable automatic pressure control.")
 
-    # Set threshold for a "low-resolution" screen
-    LOW_RES_THRESHOLD = 1000  # Adjust as needed
-    screen_width = root.winfo_screenwidth()
-    if screen_width < LOW_RES_THRESHOLD:
-        tmb.showwarning(
-            "Low Resolution Warning",
-            "Your screen resolution is low. Some toolbar elements may not be fully visible. "
-            "Try increasing the resolution or resizing the window for a better experience."
-            )
-    # Get the default font
-    default_font = font.nametofont("TkDefaultFont")
-    # Set the default font size
-    default_font.configure(size=default_font_size)
-
     # Get the text font used by text entry widgets and text boxes
     text_font = font.nametofont("TkTextFont")
     # Set the text font size
     text_font.configure(size=default_font_size)
 
     app = Controller(root, mmc)
+
+    # Set threshold for a "low-resolution" screen
+    LOW_RES_THRESHOLD = 1000  # Adjust as needed
+    screen_width = root.winfo_screenwidth()
+    screen_height = root.winfo_screenheight()
+    if screen_width < LOW_RES_THRESHOLD:
+        tmb.showwarning(
+            "Low Resolution Warning",
+            "Your screen resolution is low. Some toolbar elements may not be fully visible. "
+            "Try increasing the resolution or resizing the window for a better experience."
+            )
+    
+    def maximize_window():
+        root.state("zoomed")
+    root.geometry(f'{screen_width}x{screen_height}')  
+    root.after(100, maximize_window)
+
+    ###TODO: Need a way to wait until the pop-up information box is removed to load GUI. Otherwise it loads it the wrong size.
+
     root.mainloop()
+
+'''

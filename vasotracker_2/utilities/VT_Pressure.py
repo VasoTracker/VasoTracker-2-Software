@@ -60,7 +60,7 @@ except:
 def is_pydaqmx_available():
     return pydaqmx_available
 
-
+pydaqmx_available = True
 
 
 #########################################################################################

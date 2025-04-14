@@ -272,7 +272,8 @@ class DdtResult:
     outer_diam: np.ndarray
     inner_diam: np.ndarray
 
-def process_ddts(
+
+def process_ddts2(
     ddts, thresh_factor, thresh, nx, scale, start_x, ID_mode, detection_mode
 ) -> DdtResult:
     outer_diameters1_pos = []  # array for diameter data
@@ -284,12 +285,131 @@ def process_ddts(
     scale = scale
     start_x = [int(x) for x in start_x]
 
-    """
-    print "start_x = ", start_x
-    print "end_x = ", end_x
-    print "length = ", len(ddts[0])
-    print "thresh = ", thresh
-    """
+    for j, ddt in enumerate(ddts):
+        end_x = start_x[j] + len(ddts[0])
+
+        # Get local extrema positions
+        valley_indices = detect_peaks(ddt, mph=0.04, mpd=1, valley=True)
+        peaks_indices = detect_peaks(ddt, mph=0.04, mpd=1, valley=False)
+        # Get the local extrema values
+        valleys = [ddt[indice] for indice in valley_indices]
+        peaks = [ddt[indice] for indice in peaks_indices]
+
+        try:
+            if detection_mode == 0:
+                if len(valleys) > 0:
+                    arg1 = np.argmin(valleys)
+                    OD1 = valley_indices[arg1]
+                    OD1_ = OD1 + start_x[j]
+                else:
+                    OD1_ = 0  # Default value if no valley detected
+
+                if len(peaks) > 0:
+                    arg2 = np.argmax(peaks)
+                    OD2 = peaks_indices[arg2]
+                    OD2_ = OD2 + start_x[j]
+                else:
+                    OD2_ = nx  # Default value if no peak detected
+
+            else:
+                if len(peaks) > 0:
+                    arg1 = np.argmax(peaks)
+                    OD1 = peaks_indices[arg1]
+                    OD1_ = OD1 + start_x[j]
+                else:
+                    OD1_ = 0  
+
+                if len(valleys) > 0:
+                    arg2 = np.argmin(valleys)
+                    OD2 = valley_indices[arg2]
+                    OD2_ = OD2 + start_x[j]
+                else:
+                    OD2_ = nx 
+
+        except:
+            print("we fucked it")
+            OD1_ = 0
+            OD2_ = nx
+
+        # Inner diameter calculation
+        try:
+            if detection_mode == 0:
+                test = [item for item in peaks_indices if item > OD1 and item < (OD1 + (OD2 - OD1) / 2)]
+                ID1_ = test[0] + start_x[j] if test else np.NaN
+
+                test2 = [item for item in valley_indices if item < OD2 and item > (OD1 + (OD2 - OD1) / 2)]
+                ID2_ = test2[-1] + start_x[j] if test2 else np.NaN
+
+            else:
+                test = [item for item in valley_indices if item > OD1 and item < (OD1 + (OD2 - OD1) / 2)]
+                ID1_ = test[0] + start_x[j] if test else np.NaN
+
+                test2 = [item for item in peaks_indices if item < OD2 and item > (OD1 + (OD2 - OD1) / 2)]
+                ID2_ = test2[-1] + start_x[j] if test2 else np.NaN
+
+        except:
+            ID1_ = 0
+            ID2_ = 0
+
+        OD = scale * (OD2_ - OD1_)
+        ID = scale * (ID2_ - ID1_)
+
+        if ID_mode == 0:
+            ID1_ = np.NaN
+            ID2_ = np.NaN
+            ID = np.NaN
+
+        outer_diameters1_pos.append(OD1_)
+        outer_diameters2_pos.append(OD2_)
+        inner_diameters1_pos.append(ID1_)
+        inner_diameters2_pos.append(ID2_)
+        ODS.append(OD)
+        IDS.append(ID)
+
+    ODS_zscore = is_outlier(np.asarray(ODS), thresh_factor)
+    IDS_zscore = is_outlier(np.asarray(IDS), thresh_factor)
+
+    # ODlist_inliers = [val for val, outlier in zip(ODlist, ODS_zscore) if not outlier]
+    # IDlist_inliers = [val for val, outlier in zip(IDlist, IDS_zscore) if not outlier]
+
+    # average_OD = np.mean(ODlist_inliers)
+    # average_ID = np.mean(IDlist_inliers)
+
+    outer_diam_pos = np.column_stack((outer_diameters1_pos, outer_diameters2_pos))
+    inner_diam_pos = np.column_stack((inner_diameters1_pos, inner_diameters2_pos))
+
+    return DdtResult(
+        outer_diam_pos=outer_diam_pos,
+        inner_diam_pos=inner_diam_pos,
+        od_outliers=ODS_zscore,
+        id_outliers=IDS_zscore,
+        outer_diam=np.array(ODS),
+        inner_diam=np.array(IDS),
+    )
+
+
+
+
+def process_ddts(
+    ddts, thresh_factor, thresh, nx, scale, start_x, ID_mode, detection_mode, ultrasound_tracking
+) -> DdtResult:
+    outer_diameters1_pos = []  # array for diameter data
+    outer_diameters2_pos = []
+    inner_diameters1_pos = []  # array for diameter data
+    inner_diameters2_pos = []
+    ODS = []
+    IDS = []
+    scale = scale
+    start_x = [int(x) for x in start_x]
+    
+
+    if ultrasound_tracking == 1:
+        detection_algorithm = 2 # Normal
+    elif detection_mode == 0:
+        detection_algorithm = 0  # Fluorescence
+    else:
+        detection_algorithm = 1 # Ultrasound
+
     for j, ddt in enumerate(ddts):
         end_x = start_x[j] + len(ddts[0])
 
@@ -301,7 +421,10 @@ def process_ddts(
         peaks = [ddt[indice] for indice in peaks_indices]
         try:
             # Get the value of the biggest nadir in the first half of the dataset
-            if detection_mode == 0:
+            if detection_algorithm == 0:
+
+                
+
                 args = [
                     i
                     for i, idx in enumerate(valley_indices)
@@ -332,7 +455,7 @@ def process_ddts(
                 OD2 = peaks_indices[arg3]
                 OD2_ = peaks_indices[arg3] + start_x[j]
 
-            else:
+            elif detection_algorithm == 1:
                 # Inverted dataset logic
                 # Detecting the biggest peak (previously valley) in the first half of the dataset
                 args = [
@@ -364,13 +487,65 @@ def process_ddts(
                 OD2 = valley_indices[arg3]  # Changed from peaks_indices to valley_indices
                 OD2_ = valley_indices[arg3] + start_x[j]  # Changed from peaks_indices to valley_indices
 
+            # Algorithm 2: Modified for ultrasound tracking - Made consistent with algorithm 0
+            elif detection_algorithm == 2:
+                # Use the EXACT SAME CODE as algorithm 0 to ensure no pixel shifts
+                # Get the value of the biggest nadir in the first half of the dataset
+                args = [
+                    i
+                    for i, idx in enumerate(valley_indices)
+                    if idx > thresh and idx < len(ddts[0]) / 2
+                ]
+                
+                length_to_add = len(
+                    [i for i, idx in enumerate(valley_indices) if idx < thresh]
+                )
+                
+                nadirs_firsthalf = [valleys[i] for i in args]
+                if nadirs_firsthalf:
+                    arg1 = np.argmax(np.absolute(nadirs_firsthalf))
+                    arg1 = arg1 + length_to_add
+
+                    OD1 = valley_indices[arg1]
+                    OD1_ = valley_indices[arg1] + start_x[j]
+
+                    # Get the value of the biggest peak in the second half of the dataset
+                    args2 = [
+                        i
+                        for i, idx in enumerate(peaks_indices)
+                        if idx > OD1 + (len(ddts[0]) - OD1) / 10
+                    ]
+                    
+                    if args2:
+                        peaks_2ndhalf = [peaks[i] for i in args2]
+                        arg2 = np.argmax(np.absolute(peaks_2ndhalf))
+                        arg3 = np.where(peaks == peaks_2ndhalf[arg2])[0][0]
+
+                        OD2 = peaks_indices[arg3]
+                        OD2_ = peaks_indices[arg3] + start_x[j]
+                        
+                        print("Detected ultrasound artery - using standard detection")
+                    else:
+                        OD1_ = 0
+                        OD2_ = nx
+                else:
+                    OD1_ = 0
+                    OD2_ = nx
+
+        
+
+
+
         except:
             OD1_ = 0
             OD2_ = nx
 
+        
+
+
         # Inner diameter calculation
         try:
-            if detection_mode == 0:
+            if detection_algorithm == 0:
                 # The first inner diameter point is the first big (or the biggest) positive peak after the initial negative peak
                 # test = [item for item in peaks_indices if item > OD1_ and item < nx/2]
                 test = [
@@ -391,7 +566,7 @@ def process_ddts(
                 ]  # nx/2]
                 ID2_ = test2[-1] + start_x[j]
 
-            else:
+            elif detection_algorithm == 1:
                 # Inverted data mode
 
                 # First inner diameter point (ID1_)
@@ -413,11 +588,19 @@ def process_ddts(
 
                 ID2_ = test2[-1] + start_x[j]  # Last significant peak before OD2
 
-
+            elif detection_algorithm == 2:
+                # In ultrasound mode, OD1 and OD2 already correspond to the inner diameter
+                ID1 = OD1
+                ID1_ = OD1_
+                ID2 = OD2
+                ID2_ = OD2_
+                print("ID1, ID2: ",ID1, ID2)
 
         except:
             ID1_ = 0
             ID2_ = 0
+
+            
 
         OD = scale * (OD2_ - OD1_)
         ID = scale * (ID2_ - ID1_)

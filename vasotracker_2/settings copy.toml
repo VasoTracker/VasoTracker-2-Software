@@ -1,0 +1,48 @@
+[acquisition]
+pixel_world_scale = 1.0
+exposure = 50
+pixel_clock = 10
+recording_interval = 300.0
+refresh_min_interval = 0.2
+refresh_faster_interval = 0.01
+
+[analysis]
+num_lines = 10
+smooth = 21
+integration = 20
+threshold = 5.5
+num_threads = 1
+
+[servo]
+device = "Dev1"
+ao_channel = "ao1"
+
+[graph_axes]
+x_min = -1200.0
+x_max = 0.0
+y_min1 = 50.0
+y_max1 = 250.0
+y_min2 = 25.0
+y_max2 = 200.0
+
+[memory]
+num_plot_points = 500000
+num_data_points = 500000
+
+[pressure_control]
+default_pressure = 20.0
+time_interval = 2.0
+start_pressure = 20.0
+stop_pressure = 100.0
+pressure_interval = 20.0
+
+[TIS_DCAM]
+property_gain = 240
+
+[proxy_camera]
+path_template = "\\SampleData\\TEST{:04d}.tif"
+max_frame = 300
+
+[registration]
+register_flag = 1
+neveragain_flag = 1
