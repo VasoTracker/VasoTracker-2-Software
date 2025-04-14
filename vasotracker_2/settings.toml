@@ -45,4 +45,4 @@ max_frame = 300
 
 [registration]
 register_flag = 0
-neveragain_flag = 0
+neveragain_flag = 1
