@@ -2,8 +2,8 @@
 pixel_world_scale = 1.0
 exposure = 50
 pixel_clock = 10
-recording_interval = 5
-refresh_min_interval = 0.02
+recording_interval = 300.0
+refresh_min_interval = 0.2
 refresh_faster_interval = 0.01
 
 [analysis]
@@ -31,7 +31,7 @@ num_data_points = 500000
 
 [pressure_control]
 default_pressure = 20.0
-time_interval = 300.0
+time_interval = 2.0
 start_pressure = 20.0
 stop_pressure = 100.0
 pressure_interval = 20.0
