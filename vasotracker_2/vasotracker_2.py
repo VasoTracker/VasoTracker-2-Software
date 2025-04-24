@@ -3990,7 +3990,7 @@ class View(ctk.CTkFrame):
 
         # Add a link to the status bar along the bottom
         def callback(event):
-            webbrowser.open_new(r"https://doi.org/10.3389/fphys.2019.00099")
+            webbrowser.open_new(r"https://doi.org/10.1101/2025.04.23.648411")
         self.status_bar.bind("<Button-1>", callback)
 
         self.pack(fill=tk.BOTH, expand=False)
