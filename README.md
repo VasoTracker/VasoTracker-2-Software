@@ -1,6 +1,6 @@
-# VasoTracker 2.0 - Pressure Myograph and Blood Vessel Diameter Tracking Software (online and offline analysis)
+# VasoTracker 2.0 - Blood Vessel Diameter Tracking Software (online and offline analysis)
 
-The VasoTracker 2.0 software is a comprehensive software solution designed for the acquisition and analysis of imaging data from blood vessels mounted in a pressure myograph. It supports both live and pre-recorded video analysis, making it adaptable for various experimental set ups.
+The VasoTracker 2.0 software is a comprehensive software solution designed for the acquisition and analysis of blood vessel imaging data. It supports both live and pre-recorded video analysis, making it adaptable for various experimental set ups. It was initially developed for pressure myography, but it works for many other types of imaging!
 
 ![til](https://github.com/VasoTracker/VasoTracker-2-Software/blob/main/VasoTracker%20GUI.gif)
 
