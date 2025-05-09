@@ -2,9 +2,9 @@
 
 
 ##################################################
-## VasoTracker 2.0 Pressure Myograph Software
+## VasoTracker 2 Blood Vessel Diameter Measurement Software
 ## 
-## This software provides diameter measurements (inner and outer) of pressurised blood vessels
+## This software provides diameter measurements (inner and outer) of blood vessels
 ## 
 ## For additional info see www.vasostracker.com
 ## 
@@ -105,6 +105,7 @@ import tkinter.messagebox as tmb
 import tkinter.ttk as ttk
 from tkinter import font
 import runpy
+import json
 
 # Local application/library specific imports
 from utilities.VT_Diameter import ImageDiameters, calculate_diameter
@@ -328,6 +329,7 @@ class TableState:
         return (
             "#",
             "Time",
+            "Frame",
             "Label",
             "OD",
             "%OD ref",
@@ -1329,6 +1331,7 @@ class Model:
 
     def save_snapshot(self, image: np.ndarray, subdir: Optional[str] = None):
         current_time = int(self.time_elapsed)
+        current_frame = int(self.frame_count)
         directory = Path(self.output_dir) / "snapshots"
         if subdir is not None:
             directory = directory / subdir
@@ -1336,7 +1339,7 @@ class Model:
         image_path = directory / f"{self.output_stem}[t={current_time:06d}].tiff"
         skimage.io.imsave(image_path, image)
 
-    def save_image(self, image: np.ndarray, subdir1: Optional[str] = None, subdir2: Optional[str] = None):
+    def save_image(self, image: np.ndarray, subdir1: Optional[str] = None, subdir2: Optional[str] = None, metadata: Optional[dict] = None):
         directory = Path(self.output_dir)
 
         if self.tiff_writer1 is None and subdir1 is not None:
@@ -1346,15 +1349,30 @@ class Model:
             self.output_path2 = directory / f"{self.output_stem}_{subdir2}.tiff"
             self.initialize_tiff_writer2()
 
-        if subdir1 is not None:
-            description = str(self.output_path1)
-            ascii_description = description.encode('ascii', 'ignore').decode('ascii')
+        # Default metadata if none provided
+        if metadata is None:
+            metadata = {}
 
-            self.tiff_writer1.write(image, description=ascii_description)
+        # Add standard metadata
+        default_metadata = {
+            'Timestamp': datetime.now().isoformat(),
+            'FrameNumber': self.frame_count,
+            'TimeElapsed': self.time_elapsed,
+            'FilePath': str(self.output_path1 if subdir1 is not None else self.output_path2)
+        }
+
+        # Merge user provided metadata with default metadata
+        combined_metadata = {**default_metadata, **metadata}
+
+        # Convert metadata to JSON string for storage
+        metadata_json = json.dumps(combined_metadata)
+
+        if subdir1 is not None:
+            description = metadata_json
+            self.tiff_writer1.write(image, description=description)
         elif subdir2 is not None:
-            description = str(self.output_path2)
-            ascii_description = description.encode('ascii', 'ignore').decode('ascii')
-            self.tiff_writer2.write(image, description=ascii_description)
+            description = metadata_json
+            self.tiff_writer2.write(image, description=description)
 
     def process_updates(self):
         tb = self.state.toolbar
@@ -1807,6 +1825,7 @@ class Model:
         values = [
             self.current_table_row,  # Add row number
             self.state.toolbar.data_acq.time_string.get(),#self.time_elapsed,
+            self.frame_count,# Get the frame here
             label,
             diams.avg_outer_diam,
             percentage,
@@ -1823,6 +1842,7 @@ class Model:
         disp_values = [
             str(self.current_table_row),  # Add row number
             self.state.toolbar.data_acq.time_string.get(),#str(np.round(self.time_elapsed, 2)),
+            self.frame_count,
             label,
             str(np.round(diams.avg_outer_diam, 2)),
             percentage_as_str,
@@ -3686,6 +3706,7 @@ class TableFrame(ttk.Frame):
         self.table.column("#0", width=25)
         self.table.column("#", width=25)
         self.table.column("Time", width=75, stretch=False)
+        self.table.column("Frame", width=50, stretch=False)
         self.table.column("Label", width=200)
         self.table.column("OD", width=50)
         self.table.column("%OD ref", width=75)
@@ -3698,15 +3719,16 @@ class TableFrame(ttk.Frame):
 
         self.table.heading("#1", text="#")
         self.table.heading("#2", text="Time")
-        self.table.heading("#3", text="Label")
-        self.table.heading("#4", text="OD")
-        self.table.heading("#5", text="%OD ref")
-        self.table.heading("#6", text="ID")
-        self.table.heading("#7", text="Caliper")
-        self.table.heading("#8", text="Pavg")
-        self.table.heading("#9", text="P1")
-        self.table.heading("#10", text="P2")
-        self.table.heading("#11", text="Temp")
+        self.table.heading("#3", text="Frame")
+        self.table.heading("#4", text="Label")
+        self.table.heading("#5", text="OD")
+        self.table.heading("#6", text="%OD ref")
+        self.table.heading("#7", text="ID")
+        self.table.heading("#8", text="Caliper")
+        self.table.heading("#9", text="Pavg")
+        self.table.heading("#10", text="P1")
+        self.table.heading("#11", text="P2")
+        self.table.heading("#12", text="Temp")
 
         # Create a horizontal scrollbar and link it to the table
         h_scrollbar = ttk.Scrollbar(self, orient="horizontal", command=self.table.xview)
