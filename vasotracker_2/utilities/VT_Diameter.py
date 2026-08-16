@@ -17,11 +17,13 @@
 ## https://stackoverflow.com/questions/37334106/opening-image-on-canvas-cropping-the-image-and-update-the-canvas
 
 from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Dict, Optional
 import numpy as np
 from skimage import measure
 from .VTutils import diff2, process_ddts
 from scipy.signal import medfilt
+from scipy.ndimage import uniform_filter1d
 
 if TYPE_CHECKING:
     from vt_mvc import Roi, Caliper, RasterDrawState
@@ -90,6 +92,46 @@ class ImageDiameters:
     avg_inner_diam: float
 
 
+def auto_smooth_factor(
+    image: np.ndarray,
+    rotate_tracking: bool,
+    current: int = 21,
+    lines_to_avg: int = 20,
+    num_lines: int = 10,
+    min_s: int = 5,
+    max_s: int = 21,
+    iters: int = 3,
+    default_detection_alg: bool = False,
+) -> Optional[int]:
+    """Choose a smoothing factor of ~1/5 of the measured vessel diameter
+    (clamped to [min_s, max_s]): large enough to suppress wall/lumen texture,
+    small enough not to blur the two walls into each other. Iterates
+    measure -> set -> re-measure since the estimate depends on the smoothing.
+    """
+    rds = SimpleNamespace(roi=None, autocaliper={}, multi_roi={})
+    s = int(np.clip(current, min_s, max_s))
+    for _ in range(iters):
+        diams = calculate_diameter(
+            image=image, rds=rds, compute_id=False, default_detection_alg=default_detection_alg,
+            lines_to_avg=lines_to_avg, num_lines=num_lines, scale=1.0,
+            smooth_factor=s, thresh_factor=5.5, filter_means=True,
+            rotate_tracking=rotate_tracking, ultrasound_tracking=False,
+        )
+        if diams is None:
+            return None
+        keep = ~diams.od_outliers if (~diams.od_outliers).any() else np.ones(len(diams.outer_diam), bool)
+        od = float(np.median(diams.outer_diam[keep]))
+        if not np.isfinite(od) or od <= 0:
+            return None
+        new_s = int(np.clip(round(od / 5), min_s, max_s))
+        if new_s % 2 == 0:
+            new_s += 1
+        if new_s == s:
+            break
+        s = new_s
+    return s
+
+
 def calculate_diameter(
     image: np.ndarray,
     rds: "RasterDrawState",
@@ -103,6 +145,7 @@ def calculate_diameter(
     filter_means: bool,
     rotate_tracking: bool,
     ultrasound_tracking: bool,
+    edge_prior=None,
 ) -> Optional[ImageDiameters]:
      # Rotate the image by 90 degrees if rotate_tracking is True
 
@@ -219,10 +262,12 @@ def calculate_diameter(
         return None
 
     # Smooth the data
-    window = np.ones(smooth_factor)
+    # NOTE: uniform_filter1d(mode="nearest") is the same boxcar as convolving
+    # with np.ones(n)/n, but without the zero-padding at the profile ends,
+    # which created fake edges bigger than real vessel walls on small images.
     if ultrasound_tracking == 0:
         smoothed = [
-            np.convolve(window / window.sum(), sig, mode="same") for sig in data
+            uniform_filter1d(np.asarray(sig, dtype=float), smooth_factor, mode="nearest") for sig in data
         ]
     else:
         # Define the median filter window size
@@ -234,12 +279,10 @@ def calculate_diameter(
     # Differentiate the data. There are other methods in VTutils...
     # But this one is much faster!
     ddts = [diff2(sig, 1) for sig in smoothed]  # Was 1 \\\\\ ULTRASOUND
-    window = np.ones(smooth_factor)
-    ddts = [np.convolve(window / window.sum(), sig, mode="same") for sig in ddts]
+    ddts = [uniform_filter1d(sig, smooth_factor, mode="nearest") for sig in ddts]
 
-    window = np.ones(smooth_factor)
     if ultrasound_tracking == 0:
-        ddts = [np.convolve(window / window.sum(), sig, mode="same") for sig in ddts]
+        ddts = [uniform_filter1d(sig, smooth_factor, mode="nearest") for sig in ddts]
     else:
         # Define the median filter window size
         median_window = smooth_factor if smooth_factor % 2 == 1 else smooth_factor + 1  # Must be odd
@@ -258,6 +301,9 @@ def calculate_diameter(
         compute_id,
         default_detection_alg,
         ultrasound_tracking,
+        # All scanlines cross the same vessel only in single-ROI mode
+        consensus=(not have_autocalipers and single_roi),
+        edge_prior=edge_prior,
     )
     if diams.outer_diam_pos.ndim == 0:
         return None
