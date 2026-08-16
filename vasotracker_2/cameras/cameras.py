@@ -88,8 +88,40 @@ class ThorlabsCS165MU(CameraBase, camera_name="CS165MU"):
 
 
     def get_image(self):
-        high_bit_depth = super().get_image()
-        return (high_bit_depth / 4).astype(np.uint8)
+        # 10-bit sensor. Keep the original, hardware-verified 10->8 bit
+        # conversion (divide by 4) and bypass CameraBase's bit-depth
+        # normalisation: that relies on the adapter reporting its bit depth
+        # correctly, which we cannot verify without this camera attached.
+        # Output is byte-identical to previous releases.
+        return (np.asarray(self.mmc.getLastImage()) / 4).astype(np.uint8)
+
+
+class DemoCamera(CameraBase, camera_name="Demo"):
+    """Micro-Manager's built-in synthetic camera - for testing the live
+    acquisition path without any hardware attached."""
+    device_label = "DCam"
+    module_name = "DemoCamera"
+    device_name = "DCam"
+
+    pixel_type = "8bit"
+
+    def __init__(self, mmc: CMMCorePlus, state, config):
+        super().__init__(mmc, state, config)
+
+        self.load_device()
+        try:
+            self.set_property("PixelType", self.pixel_type)
+        except Exception:
+            traceback.print_exc()
+        exposure = state.toolbar.acq.exposure.get()
+        self.set_exposure(exposure)
+
+
+class DemoCamera16(DemoCamera, camera_name="Demo 16-bit"):
+    """Demo camera in 16-bit mode - exercises the high bit-depth frame
+    normalisation exactly like a real >8-bit camera would."""
+    pixel_type = "16bit"
+
 
 '''
 class DmtTis(CameraBase, camera_name="DMT/TIS"):
@@ -211,8 +243,16 @@ class OpenCVCamera(CameraBase, camera_name="OpenCV"):
         # Use DirectShow backend on Windows for faster camera initialization
         self.cap = cv2.VideoCapture(self.camera_index, cv2.CAP_DSHOW)
         if not self.cap.isOpened():
-            tmb.showinfo("Camera Error", f"Could not open camera {self.camera_index}")
-            return
+            self.cap.release()
+            self.cap = None
+            tmb.showinfo(
+                "Camera Error",
+                f"Could not open camera {self.camera_index}.\n"
+                "Is it in use by another program?",
+            )
+            # Raising lets the app revert to the unlocked, no-acquisition
+            # state instead of locking the toolbar for a dead camera.
+            raise RuntimeError(f"Could not open camera {self.camera_index}")
         # Set resolution
         self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
         self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
@@ -240,9 +280,14 @@ class OpenCVCamera(CameraBase, camera_name="OpenCV"):
                 gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
             else:
                 gray = frame
-            self._last_frame = gray.astype(np.uint8)
+            self._last_raw = gray.astype(np.uint8)
+            # Route through the shared contrast window (identity by default)
+            self._last_frame = self._normalise_image(self._last_raw)
             return self._last_frame
         return self._last_frame if self._last_frame is not None else np.zeros((self.height, self.width), dtype=np.uint8)
+
+    def get_raw_frame(self):
+        return getattr(self, "_last_raw", None)
 
     def image_ready(self):
         return self.cap is not None and self.cap.isOpened()
@@ -344,6 +389,7 @@ class SavedDataCamera(CameraBase, camera_name="Image from file"):
         self.camera_stopped = False
         self.last_frame = None
         self.last_frame_idx = None
+        self._compute_intensity_scaling()
 
     def reinitialize(self):
         self.frame_count = 0
@@ -351,38 +397,161 @@ class SavedDataCamera(CameraBase, camera_name="Image from file"):
         self.last_frame = None
 
 
+    def _gray_page(self, tif, idx):
+        """Read one page as grayscale, preserving bit depth."""
+        image = tif.pages[idx].asarray()
+        if image.ndim == 3:
+            code = cv2.COLOR_RGBA2GRAY if image.shape[-1] == 4 else cv2.COLOR_RGB2GRAY
+            image = cv2.cvtColor(image, code)
+        return image
+
+    def _sample_gray_pages(self):
+        """Grayscale frames sampled from the start, middle and end of the file."""
+        with tf.TiffFile(self.path_to_tiff) as tif:
+            n = len(tif.pages)
+            if n == 0:
+                return None
+            return [self._gray_page(tif, idx) for idx in sorted({0, n // 2, n - 1})]
+
+    def _compute_intensity_scaling(self):
+        """Work out the intensity window mapped to 0-255, once per file.
+
+        8-bit files default to the identity window (0-255) so results are
+        untouched unless the user adjusts contrast. Higher bit-depth cameras
+        rarely use their full range (a 12-bit sensor tops out at 4095), so
+        those default to the file's actual dynamic range (robust percentiles
+        over sampled frames). Computed once so all frames share the same
+        window and real intensity changes over time are preserved.
+        """
+        self._scale_lo = None
+        self._scale_hi = None
+        self._data_min = 0.0
+        self._data_max = 255.0
+        try:
+            samples = self._sample_gray_pages()
+        except (FileNotFoundError, tf.TiffFileError):
+            return
+        if not samples:
+            return
+        if all(s.dtype == np.uint8 for s in samples):
+            self._scale_lo, self._scale_hi = 0.0, 255.0
+            return
+        stack = np.concatenate([s.ravel() for s in samples])
+        self._data_min = float(stack.min())
+        self._data_max = float(stack.max())
+        lo = float(np.percentile(stack, 0.5))
+        hi = float(np.percentile(stack, 99.7))
+        if hi <= lo:
+            lo, hi = self._data_min, self._data_max
+        if hi <= lo:
+            hi = lo + 1.0
+        self._scale_lo = lo
+        self._scale_hi = hi
+        print(f"High bit-depth file: scaling intensities {lo:.0f}-{hi:.0f} to 0-255")
+
+    def reset_contrast(self):
+        """Back to the load-time default (identity for 8-bit files)."""
+        self._compute_intensity_scaling()
+
+    def get_raw_frame(self):
+        """Currently shown frame, before the contrast window (histogram)."""
+        try:
+            frame = int(self.state.cam_show.slider_position_manual)
+        except Exception:
+            frame = 0
+        try:
+            with tf.TiffFile(self.path_to_tiff) as tif:
+                if len(tif.pages) == 0:
+                    return None
+                frame = min(max(frame, 0), len(tif.pages) - 1)
+                return self._gray_page(tif, frame)
+        except (FileNotFoundError, tf.TiffFileError):
+            return None
+
+    def auto_contrast(self):
+        """Percentile-stretch the intensity window (any bit depth)."""
+        try:
+            samples = self._sample_gray_pages()
+        except (FileNotFoundError, tf.TiffFileError):
+            return
+        if not samples:
+            return
+        stack = np.concatenate([s.ravel() for s in samples])
+        lo = float(np.percentile(stack, 0.5))
+        hi = float(np.percentile(stack, 99.7))
+        if hi <= lo:
+            lo, hi = float(stack.min()), float(stack.max())
+        if hi <= lo:
+            hi = lo + 1.0
+        self._scale_lo = lo
+        self._scale_hi = hi
+
+    def _read_page(self, tif, idx):
+        """Read one page as 8-bit grayscale through the intensity window."""
+        image = self._gray_page(tif, idx)
+        lo = getattr(self, "_scale_lo", None)
+        hi = getattr(self, "_scale_hi", None)
+
+        if image.dtype != np.uint8:
+            if lo is None or hi is None:
+                lo, hi = float(image.min()), float(max(image.max(), image.min() + 1))
+            image = np.clip((image.astype(np.float32) - lo) / (hi - lo), 0.0, 1.0) * 255.0
+        elif lo is not None and hi is not None and (lo != 0.0 or hi != 255.0):
+            # 8-bit with a user-adjusted window; the identity default is
+            # deliberately skipped so untouched files stay bit-identical.
+            image = np.clip((image.astype(np.float32) - lo) / (hi - lo), 0.0, 1.0) * 255.0
+
+        return image.astype(np.uint8)
+
+    def _process_frame(self, tif, idx):
+        """Read a frame with the user's file image processing applied:
+        temporal averaging over the preceding frames and gaussian smoothing.
+        Both default to off (1 frame / sigma 0)."""
+        try:
+            analysis = self.state.toolbar.analysis
+            n_avg = max(1, int(analysis.temporal_frames.get()))
+            sigma = float(analysis.gauss_sigma.get())
+        except Exception:
+            n_avg, sigma = 1, 0.0
+
+        if n_avg > 1:
+            first = max(0, idx - n_avg + 1)
+            frames = [self._read_page(tif, k) for k in range(first, idx + 1)]
+            image = np.mean(frames, axis=0).astype(np.uint8)
+        else:
+            image = self._read_page(tif, idx)
+
+        if sigma > 0:
+            image = cv2.GaussianBlur(image, (0, 0), sigma)
+        return image
+
     def get_image(self):
         if self.camera_stopped:
             if self.last_frame is not None:
                 return self.last_frame
             else:
-                return np.zeros((1, 1)) 
-        
+                return np.zeros((1, 1))
+
         try:
             with tf.TiffFile(self.path_to_tiff) as tif:
                 if self.frame_count < len(tif.pages):
-                    image = tif.pages[self.frame_count].asarray()
+                    image = self._process_frame(tif, self.frame_count)
                 else:
                     image = self.last_frame  # Return the last frame
                     self.camera_stopped = True
         except (FileNotFoundError, tf.TiffFileError):
             image = np.zeros((1, 1))
 
-        # Check if the image is 16-bit, and convert to 8-bit if true
-        if image.dtype == np.uint16:
-            # Convert 16-bit to 8-bit by scaling down
-            image = ((image / 65535) * 255).astype(np.uint8)
-
         #self.frame_count = (self.frame_count + 1) % self.max_frame_count
-        return image.astype(np.uint8) 
+        return image.astype(np.uint8)
 
     def get_specific_frame(self, frame):
         if self.camera_stopped:
             if self.last_frame is not None:
                 return self.last_frame
             else:
-                return np.zeros((1, 1)) 
-            
+                return np.zeros((1, 1))
+
         if not isinstance(frame, int):
             return np.zeros((1, 1))  # Return a default blank image
 
@@ -390,20 +559,15 @@ class SavedDataCamera(CameraBase, camera_name="Image from file"):
         try:
             with tf.TiffFile(self.path_to_tiff) as tif:
                 if self.frame_count < len(tif.pages):
-                    image = tif.pages[frame].asarray()
+                    image = self._process_frame(tif, frame)
                 else:
                     image = self.last_frame  # Return the last frame
                     self.camera_stopped = True
         except (FileNotFoundError, tf.TiffFileError):
             image = np.zeros((1, 1))
 
-        # Check if the image is 16-bit, and convert to 8-bit if true
-        if image.dtype == np.uint16:
-            # Convert 16-bit to 8-bit by scaling down
-            image = ((image / 65535) * 255).astype(np.uint8)
-
         #self.frame_count = (self.frame_count + 1) % self.max_frame_count
-        return image.astype(np.uint8)    
+        return image.astype(np.uint8)
 
 
     def get_num_frames(self):
@@ -417,7 +581,9 @@ class SavedDataCamera(CameraBase, camera_name="Image from file"):
     def get_tiff_file_path(self):
         root = tk.Tk()
         root.withdraw()  # Hide the main window
-        file_path = filedialog.askopenfilename(title="Select Multi-frame TIFF File", filetypes=[("TIFF files", "*.tiff *.tif")])
+        sample_data_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "SampleData")
+        initial_dir = sample_data_dir if os.path.isdir(sample_data_dir) else os.getcwd()
+        file_path = filedialog.askopenfilename(title="Select Multi-frame TIFF File", filetypes=[("TIFF files", "*.tiff *.tif")], initialdir=initial_dir)
         return file_path
 
     def next_position(self, state):
