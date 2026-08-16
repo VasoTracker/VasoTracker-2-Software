@@ -6112,7 +6112,14 @@ def initialize_controller():
     app.view.grid_rowconfigure(0, weight=2, minsize=toolbar_h, uniform="row")
     root.update_idletasks()
     rootsplash.destroy()  # Remove the loading splash screen
-    root.attributes('-alpha', 1)
+
+    # NOTE: CustomTkinter performs widget drawing in deferred after()
+    # callbacks, which update_idletasks() does NOT flush. Revealing the
+    # window immediately therefore shows a few frames of half-drawn widgets -
+    # most visibly the switch tracks painting their red base layer before the
+    # green progress layer lands ("red flashing" on startup). Let the event
+    # loop run those draws while the window is still invisible, then reveal.
+    root.after(500, lambda: root.attributes('-alpha', 1))
 
     '''
     # **Check if registration is required**
