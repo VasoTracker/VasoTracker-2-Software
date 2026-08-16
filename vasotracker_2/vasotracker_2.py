@@ -109,7 +109,8 @@ import runpy
 import json
 
 # Local application/library specific imports
-from utilities.VT_Diameter import ImageDiameters, calculate_diameter
+from utilities.VT_Diameter import ImageDiameters, auto_smooth_factor, calculate_diameter
+from utilities.VTutils import detect_fluorescence, detect_vessel_orientation
 from utilities.VT_NavBar import CustomVTToolbar
 from utilities.VasoTrackerSplashScreen import VasoTrackerSplashScreen
 from utilities.ToolTip import ToolTip
@@ -153,7 +154,7 @@ default_font_size = 14
 VasoTracker_Blue = '#203C57'
 frame_label_color = VasoTracker_Blue
 frame_label_height = 25
-entry_disabled_color="#BDC3C7"
+entry_disabled_color="#E8E8E8"
 
 # The following is so that the required resources are included in the PyInstaller build.
 # Utility functions
@@ -207,6 +208,10 @@ class AnalysisPaneState:
     roi: BooleanVar = field(default_factory=BooleanVar)
     rotate_tracking: BooleanVar = field(default_factory=BooleanVar)
     ultrasound_tracking: BooleanVar = field(default_factory=BooleanVar)
+    # Image processing for prerecorded files (see Settings -> Image Processing)
+    gauss_sigma: DoubleVar = field(default_factory=DoubleVar)
+    temporal_frames: IntVar = field(default_factory=IntVar)
+    colormap: StringVar = field(default_factory=StringVar)
 
 
 @dataclass
@@ -439,7 +444,7 @@ class CameraViewState:
     im_presented_size: Tuple[int, int] = field(default_factory=lambda: (1, 1))
     canvas_draw_state: CanvasDrawState = field(default_factory=CanvasDrawState)
     raster_draw_state: RasterDrawState = field(default_factory=RasterDrawState)
-    slider_position_manual: IntVar = field(default_factory=IntVar)
+    slider_position_manual: int = 0
 
 
 class CsvListWrapper(list):
@@ -577,6 +582,8 @@ class MeasureStore:
         self.inner_diam_profile.clear()
         self.outer_diam_good.clear()
         self.inner_diam_good.clear()
+        self.outer_diam_roi.clear()
+        self.inner_diam_roi.clear()
 
 
 class MessageType(IntEnum):
@@ -733,6 +740,25 @@ class DiamsAndRasterResult:
 # Set to True to enable timing output
 _PROFILE_PROCESSING = False
 
+# Display-only colormaps for the camera view (file mode)
+DISPLAY_COLORMAPS = {
+    "Jet": cv2.COLORMAP_JET,
+    "Viridis": cv2.COLORMAP_VIRIDIS,
+    "Inferno": cv2.COLORMAP_INFERNO,
+    "Hot": cv2.COLORMAP_HOT,
+    "Bone": cv2.COLORMAP_BONE,
+}
+
+
+def apply_display_colormap(im: np.ndarray, colormap: str) -> np.ndarray:
+    """Convert a grayscale frame to RGB for display, optionally false-colored.
+    Display-only: the analysis always sees the grayscale image."""
+    cmap_id = DISPLAY_COLORMAPS.get(colormap)
+    if cmap_id is None:
+        return cv2.cvtColor(im, cv2.COLOR_GRAY2RGB)
+    return cv2.cvtColor(cv2.applyColorMap(im, cmap_id), cv2.COLOR_BGR2RGB)
+
+
 def compute_diameters_and_rasterise(
     im: np.ndarray,
     raster_draw_state: RasterDrawState,
@@ -748,6 +774,8 @@ def compute_diameters_and_rasterise(
     filter_diams: bool,
     rotate_tracking: bool,
     ultrasound_tracking: bool,
+    colormap: str = "Gray",
+    edge_prior=None,
 ):
     if _PROFILE_PROCESSING:
         import time as _time
@@ -766,12 +794,13 @@ def compute_diameters_and_rasterise(
         filter_means=filter_diams,
         rotate_tracking=rotate_tracking,
         ultrasound_tracking=ultrasound_tracking,
+        edge_prior=edge_prior,
     )
 
     if _PROFILE_PROCESSING:
         _t1 = _time.perf_counter()
 
-    image_colour = cv2.cvtColor(im, cv2.COLOR_GRAY2RGB)
+    image_colour = apply_display_colormap(im, colormap)
 
     if _PROFILE_PROCESSING:
         _t2 = _time.perf_counter()
@@ -818,6 +847,11 @@ class Model:
         self.mmc = mmc
         self.config_path = "settings.toml"
         self.current_table_row = 1  # Initialize row number to 0
+
+        # Temporal consistency state for flow-artefact rejection
+        self._od_history = deque(maxlen=5)
+        self._prev_edges = None
+        self._prior_streak = 0
 
         # For saving the output tiffs
         self.output_path1 = None
@@ -913,6 +947,9 @@ class Model:
         tb.analysis.filter.set(True)
         tb.analysis.ID.set(True)
         tb.analysis.org.set(False)
+        tb.analysis.gauss_sigma.set(0.0)
+        tb.analysis.temporal_frames.set(1)
+        tb.analysis.colormap.set("Gray")
 
         tb.caliper_roi.roi_flag.set("ROI")
 
@@ -975,6 +1012,7 @@ class Model:
             except:
                 pass
             self.output_file = None
+            self.output_writer = None
         if hasattr(self, 'table_file') and self.table_file is not None:
             try:
                 self.table_file.close()
@@ -1024,8 +1062,13 @@ class Model:
                 if acquiring:
                     try:
                         self.state.camera.start_acquisition()
-                    except:
-                        pass
+                    except Exception:
+                        traceback.print_exc()
+                        # Camera failed to start: revert the state so the
+                        # toolbar unlocks and another camera can be chosen.
+                        self.acquiring = False
+                        self.state.app.acquiring.set(False)
+                        return
                 else:
                     self.state.camera.stop_acquisition()
             self.acquiring = acquiring
@@ -1045,8 +1088,13 @@ class Model:
                 if tracking:
                     try:
                         self.state.camera.start_acquisition()
-                    except:
-                        pass
+                    except Exception:
+                        traceback.print_exc()
+                        # Camera failed to start: revert so the UI unlocks
+                        self.tracking = False
+                        self.state.app.tracking.set(False)
+                        self.state.app.acquiring.set(False)
+                        return
                 else:
                     self.state.camera.stop_acquisition()
             self.tracking = tracking
@@ -1096,6 +1144,10 @@ class Model:
                 self.start_time = current_time
                 self.frames_elapsed = 0
 
+        # Colormap only applies to prerecorded images
+        is_file_cam = self.state.camera is not None and self.state.camera.camera_name == "Image from file"
+        display_cmap = tb.analysis.colormap.get() if is_file_cam else "Gray"
+
         if self.executor is None:
             result = compute_diameters_and_rasterise(
                 im=im,
@@ -1112,6 +1164,7 @@ class Model:
                 filter_diams=tb.analysis.filter.get(),
                 rotate_tracking=tb.analysis.rotate_tracking.get(),
                 ultrasound_tracking=tb.analysis.ultrasound_tracking.get(),
+                colormap=display_cmap,
             )
             self.complete_processing(result)
         else:
@@ -1131,6 +1184,7 @@ class Model:
                 filter_diams=tb.analysis.filter.get(),
                 rotate_tracking=tb.analysis.rotate_tracking.get(),
                 ultrasound_tracking=tb.analysis.ultrasound_tracking.get(),
+                colormap=display_cmap,
             )
             self.futures_to_resolve.append(FutureAndCallbackFlag(future))
             self.resolve_next_pending_future()
@@ -1156,7 +1210,82 @@ class Model:
                 f.callback_bound = True
                 f.future.add_done_callback(resolve_future)
 
+    def reset_temporal_state(self):
+        self._od_history.clear()
+        self._prev_edges = None
+        self._prior_streak = 0
+
+    def _apply_temporal_consistency(self, result: DiamsAndRasterResult) -> DiamsAndRasterResult:
+        """Reject one-frame flow artefacts (debris, schlieren) that present
+        stronger edges than the vessel walls. When a frame's OD jumps >30%
+        off the recent trace, re-detect it using the previous frame's edges
+        as the search prior and accept the repair only if it lands back on
+        trend. Applied for at most 3 consecutive frames, so genuine sustained
+        diameter changes always win.
+        """
+        diams = result.diameters
+        if diams is None or not self.state.app.tracking.get():
+            return result
+        od = diams.avg_outer_diam
+        if not np.isfinite(od):
+            return result
+
+        if len(self._od_history) >= 3 and self._prev_edges is not None:
+            ref = float(np.median(self._od_history))
+            if ref > 0 and abs(od - ref) / ref > 0.3 and self._prior_streak < 3:
+                tb = self.state.toolbar
+                is_file_cam = self.state.camera is not None and self.state.camera.camera_name == "Image from file"
+                repaired = compute_diameters_and_rasterise(
+                    im=result.raw_im,
+                    raster_draw_state=self.state.cam_show.raster_draw_state,
+                    frame_id=result.frame_id,
+                    frame_time=result.frame_time,
+                    compute_id=tb.analysis.ID.get(),
+                    default_detection_alg=tb.analysis.org.get(),
+                    lines_to_avg=tb.analysis.integration_factor.get(),
+                    num_lines=tb.analysis.num_lines.get(),
+                    scale=tb.acq.scale.get(),
+                    smooth_factor=tb.analysis.smooth_factor.get(),
+                    thresh_factor=tb.analysis.thresh_factor.get(),
+                    filter_diams=tb.analysis.filter.get(),
+                    rotate_tracking=tb.analysis.rotate_tracking.get(),
+                    ultrasound_tracking=tb.analysis.ultrasound_tracking.get(),
+                    colormap=tb.analysis.colormap.get() if is_file_cam else "Gray",
+                    edge_prior=self._prev_edges,
+                )
+                new_diams = repaired.diameters
+                self._prior_streak += 1
+                if (
+                    new_diams is not None
+                    and np.isfinite(new_diams.avg_outer_diam)
+                    and abs(new_diams.avg_outer_diam - ref) / ref <= 0.3
+                ):
+                    print(
+                        f"Frame {result.frame_id}: artefact suspected (OD {od:.1f} vs trend {ref:.1f}), "
+                        f"re-detected near previous edges: OD {new_diams.avg_outer_diam:.1f}"
+                    )
+                    result = repaired
+                    diams = new_diams
+                    od = new_diams.avg_outer_diam
+                else:
+                    # Not repairable: keep the measurement, but don't let this
+                    # frame update the trusted history/prior.
+                    return result
+            else:
+                self._prior_streak = 0
+
+        self._od_history.append(od)
+        try:
+            self._prev_edges = (
+                np.asarray(diams.outer_diam_x, dtype=float)[:, 0].copy(),
+                np.asarray(diams.outer_diam_x, dtype=float)[:, 1].copy(),
+            )
+        except Exception:
+            self._prev_edges = None
+        return result
+
     def complete_processing(self, result: DiamsAndRasterResult):
+        result = self._apply_temporal_consistency(result)
 
         # Working here
         # This section should probably be in the processing part of model.
@@ -1236,7 +1365,9 @@ class Model:
             )
 
             tracking = self.state.app.tracking.get()
-            if tracking:
+            # No output file is set up when analysing a file loaded via the
+            # camera dropdown - analysis still runs, results just aren't saved.
+            if tracking and getattr(self, "output_file", None) is not None:
                 self.output_writer.writerow(self.state.measure.get_last_row())
                 self.output_file.flush()
 
@@ -1607,6 +1738,9 @@ class Model:
 
         while self.run_acq_thread:
             camera = self.state.camera
+            if camera is None:
+                time.sleep(self.sleep_duration)
+                continue
             file_analysed = self.state.app.file_analysed.get()
             '''
             Whenever an image is shown acquiring must be set to true, otherwise an image will not show.
@@ -1652,6 +1786,7 @@ class Model:
 
                         # Update the graph
                         self.state.toolbar.graph.limits_dirty.set(True)
+                        self.state.graph.dirty.set(True)
 
                         # Enable the slider
                         self.state.cam_show.slider_change_state.set(True)
@@ -1707,7 +1842,7 @@ class Model:
                     self.queue.empty() #This stops the program from constantly trying to find a new image and analysing it when running from file.
 
                     # NOTE(cmo): Don't spin super fast on the same frame in this state!
-                    sleep_duration *= 10         
+                    sleep_duration *= 2
             else:
                 pass
             time.sleep(sleep_duration)
@@ -1748,7 +1883,7 @@ class Model:
         if self.state.camera is not None:
             self.state.camera.reset()
 
-        if self.state.camera and cam_name == "Image from file":
+        if self.state.camera and cam_name.lower() == "image from file":
             self.state.camera.reset()
             self.mmc.unloadAllDevices()
             self.mmc.reset()
@@ -1756,10 +1891,36 @@ class Model:
         try:
             self.state.camera = Camera(cam_name, self.mmc, self.state, self.configure)
             image_dim = self.state.toolbar.image_dim
-            if cam_name == "Image from file":
+            if cam_name.lower() == "image from file":
                 w, h, l = self.state.camera.get_camera_dims()
                 image_dim.file_length.set(l)
                 self.state.cam_show.slider_length_dirty.set(True)
+                # Auto-detect vessel orientation and set the 90-degree checkbox
+                try:
+                    first_frame = self.state.camera.get_specific_frame(0)
+                    if first_frame is not None and first_frame.size > 4:
+                        rotate = detect_vessel_orientation(first_frame)
+                        self.state.toolbar.analysis.rotate_tracking.set(rotate)
+                        print(f"Auto-detected vessel orientation: {'horizontal (90 degree mode ON)' if rotate else 'vertical (90 degree mode off)'}")
+                        fluor = detect_fluorescence(first_frame)
+                        self.state.toolbar.analysis.org.set(fluor)
+                        print(f"Auto-detected image type: {'fluorescence (Fluor ON)' if fluor else 'transmitted light (Fluor off)'}")
+                        auto_s = auto_smooth_factor(
+                            first_frame, rotate,
+                            current=self.state.toolbar.analysis.smooth_factor.get(),
+                            lines_to_avg=self.state.toolbar.analysis.integration_factor.get(),
+                            num_lines=self.state.toolbar.analysis.num_lines.get(),
+                            default_detection_alg=fluor,
+                        )
+                        if auto_s is not None:
+                            self.state.toolbar.analysis.smooth_factor.set(auto_s)
+                            print(f"Auto-selected smoothing factor: {auto_s}")
+                except Exception:
+                    traceback.print_exc()
+                # Show the first frame and enable the slider without waiting for play
+                self.state.cam_show.slider_change_state.set(True)
+                self.state.app.tracking.set(False)
+                self.state.app.acquiring.set(True)
             else:
                 w, h = self.state.camera.get_camera_dims()
             image_dim.cam_width.set(w)
@@ -1834,10 +1995,9 @@ class Model:
             rotate_tracking=tb.analysis.rotate_tracking.get(),
             ultrasound_tracking=tb.analysis.ultrasound_tracking.get(),
         )
-        im_data = cv2.cvtColor(
-            self.state.cam_show.raw_im_data,
-            cv2.COLOR_GRAY2RGB,
-        )
+        is_file_cam = self.state.camera is not None and self.state.camera.camera_name == "Image from file"
+        display_cmap = tb.analysis.colormap.get() if is_file_cam else "Gray"
+        im_data = apply_display_colormap(self.state.cam_show.raw_im_data, display_cmap)
         rasterised = rasterise_camera_state(
             im_data,
             self.state.cam_show.raster_draw_state,
@@ -3217,7 +3377,7 @@ class StartStopPane(ToolbarPane):
         self.snapshot_button = ctk.CTkButton(self, image=self.snapshot_image, width=50, text="")#, compound='top')#text="Snapshot",
         self.snapshot_button.grid(row=1, column=2, padx=5, pady=8)#, sticky="nsew")
 
-        self.record_button = ctk.CTkSwitch(self, variable=sv.record, text="Record Camera", font=(default_font, default_font_size), switch_height=20, switch_width=40, border_width=2, border_color="#203C57")
+        self.record_button = ctk.CTkSwitch(self, variable=sv.record, text="Record Camera", font=(default_font, default_font_size), switch_height=20, switch_width=40)
         self.record_button.grid(row=2, column=0, columnspan=3, padx=5, pady=5, sticky="NS")
 
         self.model_vars.app.acquiring.trace_add(
@@ -3270,6 +3430,49 @@ class StartStopPane(ToolbarPane):
         else:
             self.track_button.configure(image=self.tracking_on_img)
 
+
+
+class ToolbarScrollContainer(ctk.CTkFrame):
+    """Hosts the toolbar in a horizontally scrollable canvas. On screens too
+    narrow to fit every pane, a scrollbar appears instead of panes being
+    silently clipped."""
+
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.canvas = tk.Canvas(self, highlightthickness=0)
+        self.hbar = ttk.Scrollbar(self, orient=tk.HORIZONTAL, command=self.canvas.xview)
+        self.canvas.configure(xscrollcommand=self.hbar.set)
+        self.canvas.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+        self.toolbar = None
+        self._window = None
+
+    def attach(self, toolbar):
+        self.toolbar = toolbar
+        self._window = self.canvas.create_window((0, 0), window=toolbar, anchor="nw")
+        toolbar.bind("<Configure>", self._sync)
+        self.canvas.bind("<Configure>", self._sync)
+        # Shift + mouse wheel scrolls the toolbar when it overflows
+        self.canvas.bind_all("<Shift-MouseWheel>", self._on_wheel)
+
+    def _sync(self, event=None):
+        if self.toolbar is None:
+            return
+        req_w = self.toolbar.winfo_reqwidth()
+        req_h = self.toolbar.winfo_reqheight()
+        avail = self.canvas.winfo_width()
+        # Stretch the toolbar to the full width when there is room (keeps the
+        # Data Acquisition pane anchored to the right); scroll when there isn't.
+        self.canvas.itemconfigure(self._window, width=max(req_w, avail))
+        self.canvas.configure(scrollregion=(0, 0, max(req_w, avail), req_h), height=req_h)
+        if req_w > avail:
+            self.hbar.pack(side=tk.BOTTOM, fill=tk.X)
+        else:
+            self.hbar.pack_forget()
+            self.canvas.xview_moveto(0)
+
+    def _on_wheel(self, event):
+        if self.toolbar is not None and self.toolbar.winfo_reqwidth() > self.canvas.winfo_width():
+            self.canvas.xview_scroll(-int(event.delta / 60), "units")
 
 
 class ToolbarView(ctk.CTkFrame):
@@ -3388,6 +3591,9 @@ class Menus:
         self.settings_menu.add_separator()
         self.settings_menu.add_command(label="Graph Axes")
         self.settings_menu.add_command(label="Show/Hide Traces")
+        self.settings_menu.add_separator()
+        self.settings_menu.add_command(label="Image Processing (file)")
+        self.settings_menu.add_command(label="Contrast")
 
         if is_pydaqmx_available:
             self.settings_menu.add_separator()
@@ -3600,6 +3806,13 @@ class GraphFrame(ttk.Frame):
         self.toolbar = CustomVTToolbar(self.canvas, self, self)  # 'self' is passed twice: once as parent, once as graph_frame reference
         self.toolbar.update()
         self.toolbar.pack(side=tk.TOP, fill=tk.X, expand=False)
+
+        # The cached blit background is only valid for the size it was captured
+        # at, so recapture after any canvas resize.
+        self.canvas.mpl_connect("resize_event", self._on_canvas_resize)
+
+    def _on_canvas_resize(self, event):
+        self._bg_stale = True
 
     def draw(self):
         """Update graph using blitting for performance."""
@@ -3998,7 +4211,7 @@ class CameraFrame(ctk.CTkFrame):
         if self.slider.cget("state") == "disabled":
             self.slider.configure(state="normal")
 
-        current_value = self.slider.get()
+        current_value = int(self.slider.get())
         self.state_vars.cam_show.slider_position_manual = current_value
 
         '''
@@ -4183,12 +4396,11 @@ class View(ctk.CTkFrame):
         root.iconbitmap(os.path.join(images_folder, 'vt_icon.ICO')) #(Path(__file__).parent / "images" / "VasoTracker_Icon.ICO") #
         root.wm_title(f"VasoTracker {__version__}")
 
-        # Maximize the window without covering the taskbar
-        root.state('zoomed')
-
         self.state_vars = state
         self.menus = Menus(root)
-        self.toolbar = ToolbarView(self, state, set_camera_callback)
+        self.toolbar_container = ToolbarScrollContainer(self)
+        self.toolbar = ToolbarView(self.toolbar_container.canvas, state, set_camera_callback)
+        self.toolbar_container.attach(self.toolbar)
         self.graph = GraphFrame(self, state)
         self.table = TableFrame(self, state)
         self.camera = CameraFrame(self, state)
@@ -4201,12 +4413,12 @@ class View(ctk.CTkFrame):
 
         # Add a link to the status bar along the bottom
         def callback(event):
-            webbrowser.open_new(r"https://doi.org/10.1101/2025.04.23.648411")
+            webbrowser.open_new(r"https://physoc.onlinelibrary.wiley.com/doi/full/10.1113/JP289322")
         self.status_bar.bind("<Button-1>", callback)
 
         self.pack(fill=tk.BOTH, expand=False)
 
-        self.toolbar.grid(
+        self.toolbar_container.grid(
             row=0,
             column=0,
             rowspan=1,
@@ -4265,15 +4477,7 @@ class View(ctk.CTkFrame):
         self.grid_columnconfigure(1, weight=1, uniform="column")
         self.grid_columnconfigure(2, weight=1, uniform="column")
 
-        # NOTE(cmo): Pop the window to the top (unhide it)
-        root.deiconify()
-
-        def set_toolbar_min_height():
-            root.update_idletasks()  # Forces layout update
-            self.grid_rowconfigure(0, weight=2, minsize=self.toolbar.winfo_height(), uniform="row")
-
-        # NOTE(cmo): Can't do this until the widget is drawn.
-        root.after(100, set_toolbar_min_height)
+        # NOTE(cmo): Toolbar min height is set in initialize_controller after layout
 
         self.shutdown_callbacks = shutdown_callbacks
         root.protocol("WM_DELETE_WINDOW", lambda *args: self.shutdown_app())
@@ -4718,6 +4922,12 @@ class Controller:
         settings_menu.entryconfig(
             settings_menu.index("Show/Hide Traces"), command=self.show_plotting_popup
         )
+        settings_menu.entryconfig(
+            settings_menu.index("Image Processing (file)"), command=self.show_image_processing_popup
+        )
+        settings_menu.entryconfig(
+            settings_menu.index("Contrast"), command=self.show_contrast_popup
+        )
         if is_pydaqmx_available:
             # Create the "DAQ Setup" dropdown menu
             settings_menu = menu.settings_menu
@@ -4914,9 +5124,15 @@ class Controller:
                 self.model.state.app.file_analysed.set(0)
             else:
                 #Rerun the analysis in the While acq code.
+                # Clear results from any previous run, otherwise the new trace
+                # plots on top of the old one and connects back to its start.
+                self.model.state.measure.clear()
+                self.model.state.table.clear.set(True)
+                self.model.state.graph.clear.set(True)
                 self.model.state.app.tracking.set(True)
                 self.model.state.app.acquiring.set(True)
                 self.model.state.app.file_analysed.set(0)
+                self.model.state.app.tracking_file.set(True)
                 self.reset_model_variables()
         else:
             if self.model.state.camera == None:
@@ -4993,18 +5209,23 @@ class Controller:
         self.model.state.cam_show.slider_position_manual = 0
         self.model.state.camera.reinitialize()
         self.model.state.frames_elapsed = 0
+        self.model.reset_temporal_state()
 
     def menu_analyze_file(self):
-        # TODO: Probably need to reset everything here.
         # TODO: reset buttons to enabled after analysis ran
         self.model.state.toolbar.acq.camera.set("...")
         if tmb.askyesno("Load image file", message="Load file to analyze. Are you sure?"):
             self.model.state.app.file_analysed.set(0) # Reset this
             self.model.state.app.tracking.set(False)
             self.model.setup_default_ui_state_loadfile()
+            # Clear previous results
+            self.model.state.table.clear.set(True)
+            self.model.state.graph.clear.set(True)
+            self.model.state.measure.clear()
             #self.model.state.camera.camera_name.set()
             self.model.state.toolbar.acq.camera.set("Image from file")
             self.set_camera("Image from file")
+            self.reset_model_variables()
             #self.model.state.cam_show.slider_change_state.set(True)
             self.output_path = None
             self.output_path = self.get_output_filename()
@@ -5050,6 +5271,8 @@ class Controller:
             initialfile="settings.toml",
             initialdir=os.getcwd(),
         )
+        if not settings_filename:
+            return  # Dialog cancelled
         try:
             new_config = Config.from_file(settings_filename)
         except:
@@ -5197,6 +5420,299 @@ class Controller:
         self.graph_axis_pane.set_button.configure(command=self.set_graph_lims)
         self.graph_axis_pane.default_button.configure(command=self.model.set_default_graph_lims)
 
+
+    def show_image_processing_popup(self):
+        popup = tk.Toplevel(root)
+        popup.title("Image Processing (file):")
+
+        icon_path = os.path.join(images_folder, 'vt_icon.ICO')
+        popup.iconbitmap(icon_path)
+        popup.resizable(False, False)
+
+        sv = self.model.state.toolbar.analysis
+        frame = tk.Frame(popup)
+        frame.pack(padx=12, pady=10)
+
+        tk.Label(
+            frame,
+            text=(
+                "Applies to images loaded from file only.\n"
+                "Smoothing changes the analysed image; the colormap is display-only."
+            ),
+            justify=tk.LEFT,
+            font=(default_font, 10),
+        ).grid(row=0, column=0, columnspan=3, sticky=tk.W, pady=(0, 10))
+
+        tk.Label(frame, text="Gaussian smooth (sigma):", font=(default_font, default_font_size)).grid(row=1, column=0, sticky=tk.E, pady=4)
+        gauss_slider = ctk.CTkSlider(
+            frame, from_=0.0, to=5.0, number_of_steps=50, width=200,
+            command=lambda v: sv.gauss_sigma.set(round(float(v), 1)),
+        )
+        gauss_slider.set(sv.gauss_sigma.get())
+        gauss_slider.grid(row=1, column=1, padx=8)
+        ctk.CTkLabel(frame, textvariable=sv.gauss_sigma, font=(default_font, default_font_size)).grid(row=1, column=2)
+
+        tk.Label(frame, text="Temporal average (frames):", font=(default_font, default_font_size)).grid(row=2, column=0, sticky=tk.E, pady=4)
+        temporal_slider = ctk.CTkSlider(
+            frame, from_=1, to=10, number_of_steps=9, width=200,
+            command=lambda v: sv.temporal_frames.set(int(round(float(v)))),
+        )
+        temporal_slider.set(sv.temporal_frames.get())
+        temporal_slider.grid(row=2, column=1, padx=8)
+        ctk.CTkLabel(frame, textvariable=sv.temporal_frames, font=(default_font, default_font_size)).grid(row=2, column=2)
+
+        tk.Label(frame, text="Colormap (display only):", font=(default_font, default_font_size)).grid(row=3, column=0, sticky=tk.E, pady=4)
+        cmap_options = ["Gray", "Jet", "Viridis", "Inferno", "Hot", "Bone"]
+        cmap_menu = ttk.OptionMenu(frame, sv.colormap, sv.colormap.get(), *cmap_options)
+        cmap_menu.grid(row=3, column=1, sticky=tk.EW, padx=8)
+
+    def show_contrast_popup(self):
+        popup = tk.Toplevel(root)
+        popup.title("Contrast:")
+
+        icon_path = os.path.join(images_folder, 'vt_icon.ICO')
+        popup.iconbitmap(icon_path)
+        popup.resizable(False, False)
+
+        frame = tk.Frame(popup)
+        frame.pack(padx=12, pady=10)
+
+        # Works for any camera with an intensity window: files always have
+        # one; live MM cameras default to their sensor's full bit depth.
+        cam = self.model.state.camera
+        if cam is None or not hasattr(cam, "contrast_range"):
+            tk.Label(
+                frame,
+                text="Contrast adjustment is available when a camera\nis selected or an image file is loaded.",
+                font=(default_font, default_font_size),
+                justify=tk.LEFT,
+            ).pack()
+            return
+
+        tk.Label(
+            frame,
+            text=(
+                "Intensity window mapped to 0-255 (raw camera counts).\n"
+                "Affects both the display and the analysed image."
+            ),
+            justify=tk.LEFT,
+            font=(default_font, 10),
+        ).grid(row=0, column=0, columnspan=3, sticky=tk.W, pady=(0, 8))
+
+        full_min, full_max = cam.contrast_range()
+
+        def get_raw():
+            return cam.get_raw_frame() if hasattr(cam, "get_raw_frame") else None
+
+        # A live >8-bit camera still on its raw bit-depth default is almost
+        # certainly showing a dim image: auto-fit it as the dialog opens so
+        # the tool starts from what the data actually is.
+        raw0 = get_raw()
+        if (
+            getattr(cam, "_scale_lo", None) is None
+            and raw0 is not None
+            and raw0.size > 1
+            and raw0.dtype != np.uint8
+        ):
+            cam.auto_contrast()
+
+        def current_window():
+            lo = getattr(cam, "_scale_lo", None)
+            hi = getattr(cam, "_scale_hi", None)
+            if lo is None or hi is None:
+                return full_min, full_max
+            return lo, hi
+
+        # View range: the span shown by the histogram and sliders. Follows
+        # the data automatically; Set/Full switch to a fixed range.
+        view = {"lo": full_min, "hi": full_max, "auto": True}
+
+        def nice_ceil(x):
+            """Round up to a tidy axis value."""
+            if x <= 0:
+                return 1.0
+            mag = 10.0 ** np.floor(np.log10(x))
+            for m in (1.0, 1.5, 2.0, 2.5, 3.0, 4.0, 5.0, 6.0, 8.0, 10.0):
+                if x <= m * mag:
+                    return m * mag
+            return 10.0 * mag
+
+        def data_fit_range(raw):
+            """Axis range covering the actual data (never the sensor max)."""
+            hi = min(nice_ceil(float(raw.max()) * 1.05), full_max)
+            lo = min(0.0, float(raw.min()))
+            if hi <= lo:
+                hi = lo + 1.0
+            return lo, hi
+
+        # Live histogram with the window mapping overlaid (ImageJ B&C style)
+        HIST_W, HIST_H = 340, 130
+        hist_canvas = tk.Canvas(frame, width=HIST_W, height=HIST_H, bg="white",
+                                highlightthickness=1, highlightbackground="gray70")
+        hist_canvas.grid(row=1, column=0, columnspan=3, pady=(0, 6))
+        stats_label = tk.StringVar(value="")
+        tk.Label(frame, textvariable=stats_label, font=(default_font, 9), fg="gray30").grid(
+            row=2, column=0, columnspan=3, sticky=tk.W, pady=(0, 6))
+
+        def draw_histogram():
+            hist_canvas.delete("all")
+            v_lo, v_hi = view["lo"], view["hi"]
+            v_span = max(v_hi - v_lo, 1.0)
+            raw = get_raw()
+            if raw is not None and raw.size > 1:
+                counts, _ = np.histogram(raw, bins=HIST_W // 2, range=(v_lo, v_hi + 1))
+                heights = np.log1p(counts.astype(float))
+                peak = heights.max()
+                if peak > 0:
+                    heights /= peak
+                bar_w = HIST_W / len(counts)
+                for i, h in enumerate(heights):
+                    if h > 0:
+                        x = i * bar_w
+                        hist_canvas.create_rectangle(
+                            x, HIST_H * (1.0 - h), x + bar_w, HIST_H,
+                            fill="gray55", outline="")
+                clipped = float(np.mean(raw > v_hi)) * 100.0
+                clip_note = f" | {clipped:.0f}% above range" if clipped >= 1 else ""
+                stats_label.set(
+                    f"frame min {raw.min():.0f} | max {raw.max():.0f} | mean {raw.mean():.0f}"
+                    f"{clip_note}   (log counts)"
+                )
+            else:
+                hist_canvas.create_text(HIST_W / 2, HIST_H / 2, fill="gray50",
+                                        text="No frame available yet\n(start the camera or scrub to a frame)",
+                                        justify=tk.CENTER, font=(default_font, 9))
+            lo, hi = current_window()
+            x_lo = (lo - v_lo) / v_span * HIST_W
+            x_hi = (hi - v_lo) / v_span * HIST_W
+            hist_canvas.create_line(x_lo, HIST_H, x_hi, 0, fill="#1f6feb", width=2)
+            hist_canvas.create_line(x_lo, 0, x_lo, HIST_H, fill="#1f6feb", dash=(3, 2))
+            hist_canvas.create_line(x_hi, 0, x_hi, HIST_H, fill="#1f6feb", dash=(3, 2))
+            # Axis end labels
+            hist_canvas.create_text(3, HIST_H - 2, anchor=tk.SW, fill="gray40",
+                                    text=f"{v_lo:.0f}", font=(default_font, 8))
+            hist_canvas.create_text(HIST_W - 3, HIST_H - 2, anchor=tk.SE, fill="gray40",
+                                    text=f"{v_hi:.0f}", font=(default_font, 8))
+
+        lo0, hi0 = current_window()
+        lo_label = tk.StringVar(value=f"{lo0:.0f}")
+        hi_label = tk.StringVar(value=f"{hi0:.0f}")
+
+        def set_black(v):
+            _, hi = current_window()
+            cam._scale_lo = min(float(v), hi - 1.0)
+            cam._scale_hi = hi
+            lo_label.set(f"{cam._scale_lo:.0f}")
+            draw_histogram()
+
+        def set_white(v):
+            lo, _ = current_window()
+            cam._scale_lo = lo
+            cam._scale_hi = max(float(v), lo + 1.0)
+            hi_label.set(f"{cam._scale_hi:.0f}")
+            draw_histogram()
+
+        tk.Label(frame, text="Black level:", font=(default_font, default_font_size)).grid(row=3, column=0, sticky=tk.E, pady=4)
+        black_slider = ctk.CTkSlider(frame, from_=full_min, to=full_max, width=220, command=set_black)
+        black_slider.grid(row=3, column=1, padx=8)
+        ctk.CTkLabel(frame, textvariable=lo_label, font=(default_font, default_font_size)).grid(row=3, column=2)
+
+        tk.Label(frame, text="White level:", font=(default_font, default_font_size)).grid(row=4, column=0, sticky=tk.E, pady=4)
+        white_slider = ctk.CTkSlider(frame, from_=full_min, to=full_max, width=220, command=set_white)
+        white_slider.grid(row=4, column=1, padx=8)
+        ctk.CTkLabel(frame, textvariable=hi_label, font=(default_font, default_font_size)).grid(row=4, column=2)
+
+        def sync_sliders():
+            lo, hi = current_window()
+            black_slider.set(min(max(lo, view["lo"]), view["hi"]))
+            white_slider.set(min(max(hi, view["lo"]), view["hi"]))
+            lo_label.set(f"{lo:.0f}")
+            hi_label.set(f"{hi:.0f}")
+            draw_histogram()
+
+        # Range controls: what span the histogram + sliders cover
+        range_lo_var = tk.StringVar()
+        range_hi_var = tk.StringVar()
+
+        def apply_view(lo, hi):
+            try:
+                lo, hi = float(lo), float(hi)
+            except (TypeError, ValueError):
+                return
+            if hi <= lo:
+                return
+            view["lo"], view["hi"] = lo, hi
+            black_slider.configure(from_=lo, to=hi)
+            white_slider.configure(from_=lo, to=hi)
+            range_lo_var.set(f"{lo:.0f}")
+            range_hi_var.set(f"{hi:.0f}")
+            sync_sliders()
+
+        def fit_view():
+            raw = get_raw()
+            if raw is None or raw.size < 2:
+                return
+            view["auto"] = True
+            apply_view(*data_fit_range(raw))
+
+        def set_range():
+            view["auto"] = False
+            apply_view(range_lo_var.get(), range_hi_var.get())
+
+        def full_view():
+            view["auto"] = False
+            apply_view(full_min, full_max)
+
+        tk.Label(frame, text="Range:", font=(default_font, default_font_size)).grid(row=5, column=0, sticky=tk.E, pady=(10, 4))
+        range_frame = tk.Frame(frame)
+        range_frame.grid(row=5, column=1, columnspan=2, sticky=tk.W, pady=(10, 4))
+        tk.Entry(range_frame, textvariable=range_lo_var, width=7, font=(default_font, 10)).pack(side=tk.LEFT)
+        tk.Label(range_frame, text=" to ", font=(default_font, 10)).pack(side=tk.LEFT)
+        tk.Entry(range_frame, textvariable=range_hi_var, width=7, font=(default_font, 10)).pack(side=tk.LEFT)
+        ctk.CTkButton(range_frame, text="Set", width=40, command=set_range).pack(side=tk.LEFT, padx=(6, 2))
+        ctk.CTkButton(range_frame, text="Fit data", width=60, command=fit_view).pack(side=tk.LEFT, padx=2)
+        ctk.CTkButton(range_frame, text="Full", width=44, command=full_view).pack(side=tk.LEFT, padx=2)
+
+        def do_auto():
+            # Percentile stretch (file: sampled frames; live: latest frame)
+            cam.auto_contrast()
+            sync_sliders()
+
+        def do_reset():
+            # Back to the default mapping for this camera / file
+            cam.reset_contrast()
+            fit_view()
+
+        ctk.CTkButton(frame, text="Auto", width=60, command=do_auto).grid(row=6, column=1, pady=(6, 0), sticky=tk.W, padx=8)
+        ctk.CTkButton(frame, text="Reset", width=60, command=do_reset).grid(row=6, column=1, pady=(6, 0), sticky=tk.E, padx=8)
+
+        # Open fitted to the data; with no frame yet, start at the sensor
+        # range and let autoscale take over when frames arrive.
+        fit_view()
+        if get_raw() is None:
+            apply_view(full_min, full_max)
+
+        # Keep the histogram live; autoscale follows the data unless the
+        # user fixed a range with Set/Full.
+        def refresh():
+            if not popup.winfo_exists():
+                return
+            raw = get_raw()
+            if raw is not None and raw.size > 1:
+                # A >8-bit camera still on its raw bit-depth default gets
+                # auto-windowed as soon as its first frame arrives, so the
+                # levels never sit at the sensor maximum.
+                if getattr(cam, "_scale_lo", None) is None and raw.dtype != np.uint8:
+                    cam.auto_contrast()
+                    sync_sliders()
+                if view["auto"]:
+                    lo, hi = data_fit_range(raw)
+                    if hi != view["hi"] or lo != view["lo"]:
+                        apply_view(lo, hi)
+            draw_histogram()
+            popup.after(500, refresh)
+
+        refresh()
 
     def show_plotting_popup(self):
         popup = tk.Toplevel(root)
@@ -5396,10 +5912,20 @@ def show_registration_screen(controller):
 
 def initialize_controller():
     """Initialize the main application and check for registration."""
-    global app  
+    global app
     app = Controller(root, mmc)  # Initialize the controller (WITHOUT launching VasoTrackerSplashScreen)
 
+    # Make window fully transparent, zoom and lay out, then reveal
+    root.attributes('-alpha', 0)
+    root.deiconify()
+    root.state('zoomed')
+    root.update_idletasks()
+    # Force toolbar min height now (widget is drawn but invisible)
+    toolbar_h = app.view.toolbar.winfo_height()
+    app.view.grid_rowconfigure(0, weight=2, minsize=toolbar_h, uniform="row")
+    root.update_idletasks()
     rootsplash.destroy()  # Remove the loading splash screen
+    root.attributes('-alpha', 1)
 
     '''
     # **Check if registration is required**
@@ -5442,12 +5968,20 @@ if __name__ == "__main__":
 
     # **Create Main Window but Keep it Hidden**
     root = tk.Tk()
-    root.withdraw()  # Keep it hidden until registration is resolved
+    root.withdraw()  # Keep it hidden until fully initialized
     root.iconbitmap(os.path.join(images_folder, 'vt_icon.ICO'))
-    root.state("zoomed")
 
     ctk.set_appearance_mode("light")
     ctk.set_default_color_theme(gui_json_path)
+    sv_ttk.set_theme("light")
+
+    # Force light colors on plain tk widgets regardless of system dark mode
+    root.tk_setPalette(
+        background="#f0f0f0",
+        foreground="black",
+        activeBackground="#e0e0e0",
+        activeForeground="black",
+    )
 
     # **Show Splash Screen**
     show_splash()

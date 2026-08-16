@@ -15,6 +15,18 @@ sys.path.insert(0, spec_dir)
 import version
 from version import __version__
 
+# Build-time sanity check: the build env must provide pyserial, not the
+# unrelated "serial" package (both install a module named `serial`). A build
+# with the wrong one ships an Arduino controller that dies with
+# "module 'serial' has no attribute 'Serial'".
+import serial as _serial_check
+if not hasattr(_serial_check, "Serial"):
+    raise SystemExit(
+        "Build environment has the wrong 'serial' module (not pyserial). "
+        "Fix with: pip uninstall serial && pip install pyserial"
+    )
+del _serial_check
+
 added_files = [("music", "music"), ("images", "images"), ("SampleData", "SampleData"), ('settings.toml', '.'), ('MMConfig.cfg', '.'), ('Basler.cfg', '.'), ('VasoTrackerblue.json', '.'), ('pacman', 'pacman'), ('space-invaders', 'space-invaders')]
 
 a = Analysis(

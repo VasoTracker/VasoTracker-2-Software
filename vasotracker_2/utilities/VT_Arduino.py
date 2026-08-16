@@ -49,6 +49,15 @@ from skimage import io
 import skimage
 from skimage import measure
 import serial
+
+# Both "pyserial" and the unrelated "serial" (a serialization library) install
+# a module named `serial`. If the wrong one is present - or got bundled into a
+# build - fail loudly with the fix instead of a cryptic AttributeError later.
+if not hasattr(serial, "Serial"):
+    raise ImportError(
+        "The installed 'serial' module is not pyserial (the unrelated 'serial' "
+        "package is shadowing it). Fix with: pip uninstall serial && pip install pyserial"
+    )
 import win32com.client
 import webbrowser
 
