@@ -29,10 +29,34 @@ del _serial_check
 
 added_files = [("music", "music"), ("images", "images"), ("SampleData", "SampleData"), ('settings.toml', '.'), ('MMConfig.cfg', '.'), ('Basler.cfg', '.'), ('VasoTrackerblue.json', '.'), ('pacman', 'pacman'), ('space-invaders', 'space-invaders')]
 
+# Conda keeps the C libraries behind Python's stdlib extension modules in
+# Library\bin, which PyInstaller misses. Without them the frozen app dies at
+# startup with "DLL load failed" (_ctypes needs ffi, pyexpat needs libexpat,
+# _ssl needs libssl/libcrypto, etc). Bundle them all explicitly.
+import glob
+_env_bin = os.path.join(sys.prefix, "Library", "bin")
+_conda_dll_patterns = [
+    "ffi*.dll",            # _ctypes
+    "*expat*.dll",         # pyexpat
+    "libssl*.dll",         # _ssl
+    "libcrypto*.dll",      # _ssl, _hashlib
+    "sqlite3*.dll",        # _sqlite3
+    "*bz2*.dll",           # _bz2
+    "liblzma*.dll",        # _lzma
+    "zlib*.dll",           # zlib users
+    "tcl86*.dll",          # tkinter
+    "tk86*.dll",           # tkinter
+]
+conda_binaries = []
+for _pat in _conda_dll_patterns:
+    conda_binaries += [(p, ".") for p in glob.glob(os.path.join(_env_bin, _pat))]
+if not any("ffi" in os.path.basename(p).lower() for p, _ in conda_binaries):
+    raise SystemExit(f"No ffi*.dll found in {_env_bin} - frozen _ctypes would fail to load.")
+
 a = Analysis(
     ['vasotracker_2.py'],
     pathex=[],
-    binaries=[],
+    binaries=conda_binaries,
     datas=added_files,
     hiddenimports=['PyDAQmx', 'scipy'],
     hookspath=[],
