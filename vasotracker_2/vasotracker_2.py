@@ -4954,9 +4954,26 @@ class Controller:
         print("setting the camera...")
         if cam_name is None:
             cam_name = self.model.state.toolbar.acq.camera.get()
-        
+
         print("Camera name:", cam_name)
         self.model.set_camera(cam_name)
+
+        # For >8-bit live cameras, let the user see and choose the intensity
+        # window that will be converted to 8-bit before acquiring.
+        cam = self.model.state.camera
+        if (
+            cam is not None
+            and cam_name != ELLIPSIS
+            and cam_name.lower() != "image from file"
+            and type(cam).get_image is CameraBase.get_image
+            and getattr(cam, "_scale_lo", None) is None
+        ):
+            try:
+                bits = int(cam.mmc.getImageBitDepth())
+            except Exception:
+                bits = 8
+            if bits > 8:
+                self.show_scaling_popup(cam)
 
     def set_camera_fov(self):
         tb = self.model.state.toolbar
@@ -5466,6 +5483,171 @@ class Controller:
         cmap_menu = ttk.OptionMenu(frame, sv.colormap, sv.colormap.get(), *cmap_options)
         cmap_menu.grid(row=3, column=1, sticky=tk.EW, padx=8)
 
+    def show_scaling_popup(self, cam):
+        """Live preview for a >8-bit camera: shows the image through a
+        candidate intensity window with a histogram, so the user can see and
+        choose the scaling that will be converted to 8-bit."""
+        popup = tk.Toplevel(root)
+        popup.title("Camera intensity scaling:")
+        icon_path = os.path.join(images_folder, 'vt_icon.ICO')
+        popup.iconbitmap(icon_path)
+        popup.resizable(False, False)
+
+        try:
+            cam.start_acquisition()
+        except Exception:
+            traceback.print_exc()
+            popup.destroy()
+            return
+
+        frame = tk.Frame(popup)
+        frame.pack(padx=12, pady=10)
+
+        tk.Label(
+            frame,
+            text=(
+                "Live preview through the selected intensity window.\n"
+                "Adjust until the image looks right, then press Use.\n"
+                "This window converts raw camera counts to 8-bit for both display\n"
+                "and analysis. You can edit it later under Settings -> Contrast."
+            ),
+            justify=tk.LEFT,
+            font=(default_font, 10),
+        ).grid(row=0, column=0, columnspan=3, sticky=tk.W, pady=(0, 8))
+
+        preview_label = tk.Label(frame, text="Waiting for camera...", width=48, height=12)
+        preview_label.grid(row=1, column=0, columnspan=3, pady=(0, 6))
+
+        HIST_W, HIST_H = 340, 90
+        hist_canvas = tk.Canvas(frame, width=HIST_W, height=HIST_H, bg="white",
+                                highlightthickness=1, highlightbackground="gray70")
+        hist_canvas.grid(row=2, column=0, columnspan=3, pady=(0, 6))
+
+        cand = {"lo": None, "hi": None, "axis_hi": None}
+        alive = {"ok": True}
+        lo_label = tk.StringVar(value="-")
+        hi_label = tk.StringVar(value="-")
+
+        def nice_ceil(x):
+            if x <= 0:
+                return 1.0
+            mag = 10.0 ** np.floor(np.log10(x))
+            for m in (1.0, 1.5, 2.0, 2.5, 3.0, 4.0, 5.0, 6.0, 8.0, 10.0):
+                if x <= m * mag:
+                    return m * mag
+            return 10.0 * mag
+
+        tk.Label(frame, text="Black level:", font=(default_font, default_font_size)).grid(row=3, column=0, sticky=tk.E, pady=2)
+        black_slider = ctk.CTkSlider(frame, from_=0, to=1, width=220)
+        black_slider.grid(row=3, column=1, padx=8)
+        ctk.CTkLabel(frame, textvariable=lo_label, font=(default_font, default_font_size)).grid(row=3, column=2)
+
+        tk.Label(frame, text="White level:", font=(default_font, default_font_size)).grid(row=4, column=0, sticky=tk.E, pady=2)
+        white_slider = ctk.CTkSlider(frame, from_=0, to=1, width=220)
+        white_slider.grid(row=4, column=1, padx=8)
+        ctk.CTkLabel(frame, textvariable=hi_label, font=(default_font, default_font_size)).grid(row=4, column=2)
+
+        def set_black(v):
+            if cand["hi"] is not None:
+                cand["lo"] = min(float(v), cand["hi"] - 1.0)
+                lo_label.set(f"{cand['lo']:.0f}")
+
+        def set_white(v):
+            if cand["lo"] is not None:
+                cand["hi"] = max(float(v), cand["lo"] + 1.0)
+                hi_label.set(f"{cand['hi']:.0f}")
+
+        black_slider.configure(command=set_black)
+        white_slider.configure(command=set_white)
+
+        def init_candidate(raw):
+            lo = float(np.percentile(raw, 0.5))
+            hi = float(np.percentile(raw, 99.7))
+            if hi <= lo:
+                lo, hi = float(raw.min()), float(max(raw.max(), raw.min() + 1))
+            cand["lo"], cand["hi"] = lo, hi
+            axis_hi = nice_ceil(float(raw.max()) * 1.05)
+            cand["axis_hi"] = axis_hi
+            black_slider.configure(from_=0, to=axis_hi)
+            white_slider.configure(from_=0, to=axis_hi)
+            black_slider.set(lo)
+            white_slider.set(hi)
+            lo_label.set(f"{lo:.0f}")
+            hi_label.set(f"{hi:.0f}")
+
+        def do_auto():
+            raw = cam.get_raw_frame()
+            if raw is not None and raw.size > 1:
+                init_candidate(raw)
+
+        def finish(apply):
+            alive["ok"] = False
+            try:
+                cam.stop_acquisition()
+            except Exception:
+                traceback.print_exc()
+            if apply and cand["lo"] is not None:
+                cam._scale_lo = cand["lo"]
+                cam._scale_hi = cand["hi"]
+                print(f"Camera intensity window set: {cand['lo']:.0f}-{cand['hi']:.0f} -> 0-255")
+            popup.destroy()
+
+        ctk.CTkButton(frame, text="Auto", width=60, command=do_auto).grid(row=5, column=0, pady=(8, 0))
+        ctk.CTkButton(frame, text="Use this scaling", width=130,
+                      command=lambda: finish(True)).grid(row=5, column=1, pady=(8, 0))
+        ctk.CTkButton(frame, text="Cancel", width=60,
+                      command=lambda: finish(False)).grid(row=5, column=2, pady=(8, 0))
+        popup.protocol("WM_DELETE_WINDOW", lambda: finish(False))
+
+        def draw_histogram(raw):
+            hist_canvas.delete("all")
+            axis_hi = cand["axis_hi"] or float(max(raw.max(), 1))
+            counts, _ = np.histogram(raw, bins=HIST_W // 2, range=(0, axis_hi + 1))
+            heights = np.log1p(counts.astype(float))
+            peak = heights.max()
+            if peak > 0:
+                heights /= peak
+            bar_w = HIST_W / len(counts)
+            for i, h in enumerate(heights):
+                if h > 0:
+                    x = i * bar_w
+                    hist_canvas.create_rectangle(x, HIST_H * (1.0 - h), x + bar_w, HIST_H,
+                                                 fill="gray55", outline="")
+            if cand["lo"] is not None:
+                x_lo = cand["lo"] / axis_hi * HIST_W
+                x_hi = cand["hi"] / axis_hi * HIST_W
+                hist_canvas.create_line(x_lo, HIST_H, x_hi, 0, fill="#1f6feb", width=2)
+                hist_canvas.create_line(x_lo, 0, x_lo, HIST_H, fill="#1f6feb", dash=(3, 2))
+                hist_canvas.create_line(x_hi, 0, x_hi, HIST_H, fill="#1f6feb", dash=(3, 2))
+            hist_canvas.create_text(HIST_W - 3, HIST_H - 2, anchor=tk.SE, fill="gray40",
+                                    text=f"{axis_hi:.0f}", font=(default_font, 8))
+
+        def update_preview():
+            if not alive["ok"] or not popup.winfo_exists():
+                return
+            raw = None
+            try:
+                raw = cam.get_raw_frame()
+            except Exception:
+                pass
+            if raw is not None and raw.size > 1:
+                if cand["lo"] is None:
+                    init_candidate(raw)
+                lo, hi = cand["lo"], cand["hi"]
+                disp = np.clip((raw.astype(np.float32) - lo) / max(hi - lo, 1.0), 0.0, 1.0) * 255.0
+                disp = disp.astype(np.uint8)
+                h, w = disp.shape
+                scale = min(1.0, 420.0 / w)
+                if scale < 1.0:
+                    disp = cv2.resize(disp, (int(w * scale), int(h * scale)))
+                img = ImageTk.PhotoImage(Image.fromarray(disp))
+                preview_label.configure(image=img, text="", width=disp.shape[1], height=disp.shape[0])
+                preview_label.image = img  # keep a reference
+                draw_histogram(raw)
+            popup.after(100, update_preview)
+
+        update_preview()
+
     def show_contrast_popup(self):
         popup = tk.Toplevel(root)
         popup.title("Contrast:")
@@ -5492,8 +5674,13 @@ class Controller:
         tk.Label(
             frame,
             text=(
-                "Intensity window mapped to 0-255 (raw camera counts).\n"
-                "Affects both the display and the analysed image."
+                "Re-maps raw camera counts to 8-bit (0-255), for both the\n"
+                "display and the analysed image. The histogram shows the raw\n"
+                "data, so adjustments never re-stretch an already-converted\n"
+                "image. Changes apply to new frames only: adjusting mid-\n"
+                "recording puts a step in the intensity record, so set this\n"
+                "before recording and leave it fixed during. (8-bit sources\n"
+                "have no raw data behind them and are unchanged by default.)"
             ),
             justify=tk.LEFT,
             font=(default_font, 10),
