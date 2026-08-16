@@ -1,12 +1,13 @@
-# VasoTracker 2.2 - Blood Vessel Diameter Tracking Software (online and offline analysis)
+# VasoTracker 2.3 - Blood Vessel Diameter Tracking Software (online and offline analysis)
 
-The VasoTracker 2.2 software is a comprehensive software solution designed for the acquisition and analysis of blood vessel imaging data. It supports both live and pre-recorded video analysis, making it adaptable for various experimental set ups. It was initially developed for pressure myography, but it works for many other types of imaging!
+The VasoTracker 2.3 software is a comprehensive software solution designed for the acquisition and analysis of blood vessel imaging data. It supports both live and pre-recorded video analysis, making it adaptable for various experimental set ups. It was initially developed for pressure myography, but it works for many other types of imaging!
 
 ![til](https://github.com/VasoTracker/VasoTracker-2-Software/blob/main/VasoTracker%20GUI.gif)
 
 
 
 ## Table of Contents
+- [What's New in v2.3](#whats-new-in-v23)
 - [What's New in v2.2](#whats-new-in-v22)
 - [Key Features](#key-features)
 - [Installation Instructions](#vasotracker-installation-instructions)
@@ -14,6 +15,18 @@ The VasoTracker 2.2 software is a comprehensive software solution designed for t
   - [From Source](#option-2-installing-from-source-using-anaconda)
 - [License](#license)
 - [Issues](#issues)
+
+---
+
+## What's New in v2.3 (August 2026)
+
+* **Open any TIFF:** RGB and high bit-depth (10/12/16-bit) recordings now load and analyse directly. Intensities are automatically windowed to the data actually present, so 16-bit files no longer appear black - no manual 8-bit conversion needed.
+* **Smart file loading:** On loading a file, VasoTracker auto-detects the vessel orientation (90&deg; mode), fluorescence vs transmitted light, and a suitable smoothing factor. Every decision is shown in the console and adjustable as usual.
+* **More robust diameter tracking:** Edge-corrected smoothing removes boundary artefacts that biased measurements on small images; scanlines now cross-check each other (with support for slanted vessels), and one-frame flow artefacts (bubbles, debris) are automatically re-detected against the recent trace instead of spiking the record.
+* **Brightness & Contrast tool:** A Fiji-style contrast dialog (Settings > Contrast) with a live histogram, black/white level sliders, and a data-autoscaled range - plus a scaling preview when connecting a >8-bit camera, so the raw-to-8-bit conversion is a visible choice.
+* **Image processing for files:** Optional Gaussian smoothing, temporal frame averaging, and display colormaps for prerecorded recordings (Settings > Image Processing).
+* **Demo cameras:** Micro-Manager's synthetic camera ("Demo", "Demo 16-bit") is available in the camera dropdown for testing a full acquisition setup without hardware.
+* **Reliability:** A failed camera connection (e.g. webcam in use elsewhere) no longer locks the toolbar; re-running a file analysis fully clears the previous results; the toolbar scrolls on small screens instead of cutting off panes; packaged builds bundle all required system libraries (fixes startup crashes on machines without Anaconda).
 
 ---
 
