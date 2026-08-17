@@ -1,4 +1,4 @@
-##################################################
+﻿##################################################
 ## VasoTracker 2 - Blood Vessel Diameter Measurement Software
 ##
 ## Author: Calum Wilson, Matthew D Lee, and Chris Osborne
@@ -8,7 +8,7 @@
 ##################################################
 
 
-__version__ = "2.3.0"
+__version__ = "2.3.1"
 
 # Micro-Manager compatibility pins - keep these two in sync (MICROMANAGER.md).
 # MM_DEVICE_INTERFACE must equal the device interface version of the pymmcore
