@@ -6137,6 +6137,14 @@ if __name__ == "__main__":
     mm_path = find_micromanager()
     print(mm_path)
 
+    # The newest Micro-Manager nightly known to match the device interface
+    # version (DIV 74) of the pymmcore we ship. See MICROMANAGER.md: the
+    # nightlies move to new interface versions over time, so "latest" (and
+    # even pymmcore-plus's "latest-compatible") can silently install an
+    # incompatible Micro-Manager. Update this date whenever pymmcore is
+    # upgraded to a new device interface.
+    KNOWN_COMPATIBLE_MM_NIGHTLY = "20251231"
+
     if mm_path is None:
         # Try to auto-install Micro-Manager
         try:
@@ -6144,7 +6152,13 @@ if __name__ == "__main__":
                         "Micro-Manager not found. Installing automatically...\n\n"
                         "This may take a few minutes on first run.")
             from pymmcore_plus.install import install
-            install()
+            try:
+                install(release=KNOWN_COMPATIBLE_MM_NIGHTLY)
+            except Exception:
+                # Pinned build unavailable (e.g. no longer hosted):
+                # fall back to pymmcore-plus's own resolution.
+                traceback.print_exc()
+                install()
             mm_path = find_micromanager()
         except Exception as e:
             print(f"Auto-install failed: {e}")
@@ -6152,7 +6166,13 @@ if __name__ == "__main__":
 
     if mm_path is None:
         # Auto-install failed, show manual instructions
-        tmb.showinfo("Warning", "MicroManager could not be installed. Please download and install manually, then relaunch VasoTracker.")
+        tmb.showinfo(
+            "Warning",
+            "Micro-Manager could not be installed automatically.\n\n"
+            "Please download and install the nightly build dated "
+            f"{KNOWN_COMPATIBLE_MM_NIGHTLY} (newer builds use an incompatible "
+            "device interface), then relaunch VasoTracker.",
+        )
         webbrowser.open_new("https://download.micro-manager.org/nightly/2.0/Windows/")
         root.destroy()
         sys.exit()
