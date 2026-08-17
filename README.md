@@ -104,7 +104,10 @@ For cameras requiring specific Micro-Manager device adapters:
    - Complete the wizard and save the configuration
 
 3. **Save the config file:**
-   - Save as `MMConfig.cfg` in your VasoTracker folder
+   - Save as `MMConfig.cfg` in your VasoTracker folder:
+     - Packaged app: inside the `_internal` folder next to `vasotracker_x.y.z.exe` (replace the bundled `MMConfig.cfg`)
+     - Running from source: the `vasotracker_2` folder
+     - (When you select "MMConfig" as the camera, the console prints the exact path it is looking in.)
 
 4. **Select your camera in VasoTracker:**
    - Choose "MMConfig" as your camera type
