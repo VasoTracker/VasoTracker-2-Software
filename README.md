@@ -68,7 +68,7 @@ VasoTracker can be installed using either the standalone executable file for str
 #### Steps:
 
 1. **Download the latest VasoTracker release:**
-   - Visit the [VasoTracker Releases Page](https://github.com/VasoTracker/VasoTracker-2/releases) and download the latest zip file for your operating system.
+   - Visit the [VasoTracker Releases Page](https://github.com/VasoTracker/VasoTracker-2-Software/releases) and download the latest zip file for your operating system.
 
 2. **Extract the Zip File:**
    - Locate the downloaded zip file on your computer.

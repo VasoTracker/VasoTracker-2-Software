@@ -742,8 +742,8 @@ _PROFILE_PROCESSING = False
 
 # Update checking: a single anonymous read of the public GitHub releases API.
 # Nothing about the user or their data is sent; failures are silent.
-RELEASES_PAGE_URL = "https://github.com/VasoTracker/VasoTracker-2/releases"
-RELEASES_API_URL = "https://api.github.com/repos/VasoTracker/VasoTracker-2/releases/latest"
+RELEASES_PAGE_URL = "https://github.com/VasoTracker/VasoTracker-2-Software/releases"
+RELEASES_API_URL = "https://api.github.com/repos/VasoTracker/VasoTracker-2-Software/releases/latest"
 
 
 def _parse_version(text):
