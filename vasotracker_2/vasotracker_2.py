@@ -6138,12 +6138,27 @@ if __name__ == "__main__":
     print(mm_path)
 
     # The newest Micro-Manager nightly known to match the device interface
-    # version (DIV 74) of the pymmcore we ship. See MICROMANAGER.md: the
-    # nightlies move to new interface versions over time, so "latest" (and
-    # even pymmcore-plus's "latest-compatible") can silently install an
-    # incompatible Micro-Manager. Update this date whenever pymmcore is
-    # upgraded to a new device interface.
-    KNOWN_COMPATIBLE_MM_NIGHTLY = "20251231"
+    # version of the pymmcore we ship (pins live in version.py; see
+    # MICROMANAGER.md). The nightlies move to new interface versions over
+    # time, so "latest" (and even pymmcore-plus's "latest-compatible") can
+    # silently install an incompatible Micro-Manager.
+    KNOWN_COMPATIBLE_MM_NIGHTLY = version.MM_COMPATIBLE_NIGHTLY
+
+    # Consistency check: warn loudly if the pymmcore actually present speaks
+    # a different device interface than the one our pin was chosen for
+    # (e.g. someone upgraded pymmcore without updating version.py).
+    try:
+        import pymmcore
+        _div = int(str(pymmcore.__version__).split(".")[3])
+        if _div != version.MM_DEVICE_INTERFACE:
+            print(
+                f"WARNING: pymmcore device interface is {_div}, but the "
+                f"Micro-Manager pin targets interface {version.MM_DEVICE_INTERFACE}. "
+                f"Update MM_DEVICE_INTERFACE and MM_COMPATIBLE_NIGHTLY in "
+                f"version.py (see MICROMANAGER.md)."
+            )
+    except Exception:
+        traceback.print_exc()
 
     if mm_path is None:
         # Try to auto-install Micro-Manager

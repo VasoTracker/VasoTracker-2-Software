@@ -15,6 +15,22 @@ sys.path.insert(0, spec_dir)
 import version
 from version import __version__
 
+# Build-time check: the Micro-Manager nightly the app auto-installs must be
+# built against the same device interface as the pymmcore we are bundling.
+# When pymmcore is upgraded past a device interface bump, this fails the
+# build until the pins in version.py are updated (see MICROMANAGER.md) -
+# instead of shipping an app that installs an incompatible Micro-Manager.
+import pymmcore as _pymmcore_check
+_bundled_div = int(str(_pymmcore_check.__version__).split(".")[3])
+if _bundled_div != version.MM_DEVICE_INTERFACE:
+    raise SystemExit(
+        f"pymmcore in the build env speaks device interface {_bundled_div}, but "
+        f"version.py pins Micro-Manager for interface {version.MM_DEVICE_INTERFACE}. "
+        "Update MM_DEVICE_INTERFACE and MM_COMPATIBLE_NIGHTLY in version.py "
+        "per MICROMANAGER.md before building."
+    )
+del _pymmcore_check
+
 # Build-time sanity check: the build env must provide pyserial, not the
 # unrelated "serial" package (both install a module named `serial`). A build
 # with the wrong one ships an Arduino controller that dies with
