@@ -168,7 +168,12 @@ class CameraBase:
         pass
 
     def start_acquisition(self):
-        self.mmc.startContinuousSequenceAcquisition(0)
+        # Idempotent: enabling tracking while already acquiring (or any
+        # repeated start) must not raise - Micro-Manager refuses to start a
+        # sequence that is already running, and callers treat exceptions
+        # here as "camera failed", reverting the acquisition state.
+        if not self.mmc.isSequenceRunning():
+            self.mmc.startContinuousSequenceAcquisition(0)
         self.running = True
 
     def stop_acquisition(self):
