@@ -6200,11 +6200,31 @@ def initialize_controller():
 
     # NOTE: CustomTkinter performs widget drawing in deferred after()
     # callbacks, which update_idletasks() does NOT flush. Revealing the
-    # window immediately therefore shows a few frames of half-drawn widgets -
-    # most visibly the switch tracks painting their red base layer before the
-    # green progress layer lands ("red flashing" on startup). Let the event
-    # loop run those draws while the window is still invisible, then reveal.
-    root.after(500, lambda: root.attributes('-alpha', 1))
+    # window while those draws are still landing shows half-drawn widgets -
+    # most visibly the switch tracks painting their red base layer before
+    # the green progress layer ("red flashing" on startup). A fixed delay
+    # is a race on slow/busy machines, so instead reveal once the UI has
+    # been quiet (no widget configure/draw activity) for a settling period,
+    # with a hard cap so the window can never fail to appear.
+    _reveal = {"last_activity": time.time(), "started": time.time(), "done": False}
+
+    def _note_ui_activity(event=None):
+        _reveal["last_activity"] = time.time()
+
+    root.bind_all("<Configure>", _note_ui_activity, add="+")
+
+    def _try_reveal():
+        if _reveal["done"]:
+            return
+        quiet_for = time.time() - _reveal["last_activity"]
+        total = time.time() - _reveal["started"]
+        if quiet_for >= 0.4 or total >= 4.0:
+            _reveal["done"] = True
+            root.attributes('-alpha', 1)
+        else:
+            root.after(100, _try_reveal)
+
+    root.after(300, _try_reveal)
 
     '''
     # **Check if registration is required**
