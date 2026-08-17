@@ -740,6 +740,29 @@ class DiamsAndRasterResult:
 # Set to True to enable timing output
 _PROFILE_PROCESSING = False
 
+# Update checking: a single anonymous read of the public GitHub releases API.
+# Nothing about the user or their data is sent; failures are silent.
+RELEASES_PAGE_URL = "https://github.com/VasoTracker/VasoTracker-2/releases"
+RELEASES_API_URL = "https://api.github.com/repos/VasoTracker/VasoTracker-2/releases/latest"
+
+
+def _parse_version(text):
+    return tuple(int(p) for p in str(text).strip().lstrip("vV").split(".")[:3])
+
+
+def get_latest_release(timeout=5):
+    """Return (version_tuple, tag, url) for the newest published GitHub
+    release. Raises on any network/parse failure - callers decide how quiet
+    to be about it."""
+    import json
+    from urllib.request import Request, urlopen
+
+    req = Request(RELEASES_API_URL, headers={"User-Agent": f"VasoTracker/{__version__}"})
+    with urlopen(req, timeout=timeout) as resp:
+        data = json.loads(resp.read())
+    tag = str(data.get("tag_name", "")).strip()
+    return _parse_version(tag), tag, data.get("html_url", RELEASES_PAGE_URL)
+
 # Display-only colormaps for the camera view (file mode)
 DISPLAY_COLORMAPS = {
     "Jet": cv2.COLORMAP_JET,
@@ -5354,12 +5377,74 @@ class Controller:
         )
 
     def menu_about(self):
-        webbrowser.open_new(r"http://www.vasotracker.com/about/")
+        popup = tk.Toplevel(root)
+        popup.title("About VasoTracker")
+        icon_path = os.path.join(images_folder, 'vt_icon.ICO')
+        popup.iconbitmap(icon_path)
+        popup.resizable(False, False)
+
+        frame = tk.Frame(popup)
+        frame.pack(padx=18, pady=12)
+
+        tk.Label(frame, text=f"VasoTracker {__version__}", font=(default_font, 14, "bold")).pack()
+        tk.Label(frame, text="Blood vessel diameter measurement software", font=(default_font, 10)).pack(pady=(2, 8))
+
+        link = tk.Label(frame, text="www.vasotracker.com", fg="#1f6feb", cursor="hand2",
+                        font=(default_font, 10, "underline"))
+        link.pack()
+        link.bind("<Button-1>", lambda e: webbrowser.open_new("http://www.vasotracker.com/about/"))
+
+        status = tk.StringVar(value="")
+        tk.Label(frame, textvariable=status, font=(default_font, 10)).pack(pady=(10, 2))
+
+        def do_check():
+            status.set("Checking for updates...")
+
+            def worker():
+                try:
+                    latest, tag, url = get_latest_release()
+                except Exception:
+                    traceback.print_exc()
+                    result = ("Could not reach the update server.", None, None)
+                else:
+                    if latest > _parse_version(__version__):
+                        result = (f"Version {tag} is available.", tag, url)
+                    else:
+                        result = (f"You are up to date ({__version__}).", None, None)
+
+                def apply():
+                    if not popup.winfo_exists():
+                        return
+                    status.set(result[0])
+                    if result[2] and tmb.askyesno(
+                        "Update available",
+                        f"VasoTracker {result[1]} is available (you have {__version__}).\n"
+                        "Open the download page?",
+                    ):
+                        webbrowser.open_new(result[2])
+
+                popup.after(0, apply)
+
+            threading.Thread(target=worker, daemon=True).start()
+
+        ctk.CTkButton(frame, text="Check for updates", command=do_check).pack(pady=(4, 2))
 
     def menu_update(self):
-        webbrowser.open_new(
-            r"https://github.com/VasoTracker/VasoTracker-2/releases"
-        )
+        try:
+            latest, tag, url = get_latest_release()
+        except Exception:
+            traceback.print_exc()
+            webbrowser.open_new(RELEASES_PAGE_URL)
+            return
+        if latest > _parse_version(__version__):
+            if tmb.askyesno(
+                "Update available",
+                f"VasoTracker {tag} is available (you have {__version__}).\n"
+                "Open the download page?",
+            ):
+                webbrowser.open_new(url)
+        else:
+            tmb.showinfo("Up to date", f"You are running the latest version ({__version__}).")
 
 
 
