@@ -775,6 +775,18 @@ DISPLAY_COLORMAPS = {
 }
 
 
+def safe_var_set(var, value, default=0.0):
+    """Set a Tk numeric variable, mapping NaN/inf to a default. Tk integer
+    variables cannot hold NaN and raise from inside widget callbacks (e.g.
+    fibrous mode reports inner diameter as NaN)."""
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        var.set(default)
+        return
+    var.set(f if np.isfinite(f) else default)
+
+
 def apply_display_colormap(im: np.ndarray, colormap: str) -> np.ndarray:
     """Convert a grayscale frame to RGB for display, optionally false-colored.
     Display-only: the analysis always sees the grayscale image."""
@@ -1494,8 +1506,8 @@ class Model:
                     measure.inner_diam_roi[i].append(line_id_value)
 
                     # This is used to update the variable in the entry box the show/ hides traces.
-                    tb.plotting.outer_diam_values[i].set(line_od_value)
-                    tb.plotting.inner_diam_values[i].set(line_id_value)
+                    safe_var_set(tb.plotting.outer_diam_values[i], line_od_value)
+                    safe_var_set(tb.plotting.inner_diam_values[i], line_id_value)
                     
 
 
@@ -1524,8 +1536,8 @@ class Model:
             formatted_time = time.strftime("%H:%M:%S", time.gmtime(np.round(time_elapsed, 1)))
             tb.data_acq.time_string.set(formatted_time)
             if diams is not None:
-                tb.data_acq.outer_diam.set(np.round(diams.avg_outer_diam, 1))
-                tb.data_acq.inner_diam.set(np.round(diams.avg_inner_diam, 1))
+                safe_var_set(tb.data_acq.outer_diam, np.round(diams.avg_outer_diam, 1))
+                safe_var_set(tb.data_acq.inner_diam, np.round(diams.avg_inner_diam, 1))
             ref_diam = self.state.table.ref_diam.get()
             if not np.isnan(ref_diam) and ref_diam != 0.0:
                 outer_percentage = np.round((diams.avg_outer_diam / ref_diam) * 100, 2)
@@ -1859,13 +1871,13 @@ class Model:
                     slider_img = camera.get_specific_frame(self.state.cam_show.slider_position_manual)
                     slider_index = int(self.state.cam_show.slider_position_manual) - 1
 
-                    self.state.toolbar.data_acq.outer_diam.set(np.round(self.state.measure.outer_diam[slider_index], 1))
-                    self.state.toolbar.data_acq.inner_diam.set(np.round(self.state.measure.inner_diam[slider_index], 1))
+                    safe_var_set(self.state.toolbar.data_acq.outer_diam, np.round(self.state.measure.outer_diam[slider_index], 1))
+                    safe_var_set(self.state.toolbar.data_acq.inner_diam, np.round(self.state.measure.inner_diam[slider_index], 1))
                     # If no multi ROIs have been drawn then an error is returned as cant set the value. There way be a better way to do this other than try.
                     try:
                         for i in range(NUM_LINES):
-                            self.state.toolbar.plotting.outer_diam_values[i].set(self.state.measure.outer_diam_roi[i][slider_index])
-                            self.state.toolbar.plotting.inner_diam_values[i].set(self.state.measure.inner_diam_roi[i][slider_index])
+                            safe_var_set(self.state.toolbar.plotting.outer_diam_values[i], self.state.measure.outer_diam_roi[i][slider_index])
+                            safe_var_set(self.state.toolbar.plotting.inner_diam_values[i], self.state.measure.inner_diam_roi[i][slider_index])
                     except:
                         pass
                     self.prev_slider_index = slider_index
@@ -1926,6 +1938,11 @@ class Model:
                 w, h, l = self.state.camera.get_camera_dims()
                 image_dim.file_length.set(l)
                 self.state.cam_show.slider_length_dirty.set(True)
+                # Fit the graph time axis to the file: the trace is plotted
+                # relative to the newest point, so a full sweep spans -l..0.
+                self.state.toolbar.graph.x_min.set(-int(l))
+                self.state.toolbar.graph.x_max.set(0)
+                self.state.toolbar.graph.dirty.set(True)
                 # Auto-detect vessel orientation and set the 90-degree checkbox
                 try:
                     first_frame = self.state.camera.get_specific_frame(0)
@@ -2640,8 +2657,8 @@ class AnalysisSettingsPane(ToolbarPane):
         self.org_entry = ctk.CTkCheckBox(self.checkboxes_frame, text="US", font=(default_font, default_font_size), variable=sv.ultrasound_tracking, checkbox_height=checkbox_height, checkbox_width=checkbox_width)
         self.org_entry.grid(row=1, column=2, padx=padx, pady=pady, sticky=tk.NS)  # Moved to the third column for consistency
 
-        self.texture_entry = ctk.CTkCheckBox(self.checkboxes_frame, text="Fib", font=(default_font, default_font_size), variable=sv.texture_tracking, checkbox_height=checkbox_height, checkbox_width=checkbox_width)
-        self.texture_entry.grid(row=2, column=0, padx=padx, pady=pady, sticky=tk.NS)
+        self.texture_entry = ctk.CTkCheckBox(self.checkboxes_frame, text="Texture", font=(default_font, default_font_size), variable=sv.texture_tracking, checkbox_height=checkbox_height, checkbox_width=checkbox_width)
+        self.texture_entry.grid(row=0, column=2, padx=padx, pady=pady, sticky=tk.NS)
 
         # Create a single tooltip instance for the container
         tooltip = ToolTip(self)
@@ -4765,6 +4782,29 @@ class Controller:
         self.bind_checkboxes()
         self.bind_menu_items()
 
+        # Fibrous mode measures image texture; gaussian/temporal smoothing
+        # (Settings > Image Processing) destroys exactly that signal.
+        def _warn_fib_smoothing(*args):
+            tbx = self.model.state.toolbar.analysis
+            if not tbx.texture_tracking.get():
+                return
+            try:
+                g = float(tbx.gauss_sigma.get())
+                n = int(tbx.temporal_frames.get())
+            except Exception:
+                return
+            if g > 0 or n > 1:
+                tmb.showwarning(
+                    "Texture mode and smoothing",
+                    "Gaussian/temporal smoothing (Settings > Image Processing) removes "
+                    "the image texture that Texture mode measures, so wall detection "
+                    "will degrade badly.\n\n"
+                    "Set Gaussian smoothing to 0 and temporal averaging to 1 when "
+                    "using Texture mode.",
+                )
+
+        self.model.state.toolbar.analysis.texture_tracking.trace_add("write", _warn_fib_smoothing)
+
         self.output_path = None
 
         #output_path = self.get_output_filename()
@@ -5542,6 +5582,7 @@ class Controller:
         icon_path = os.path.join(images_folder, 'vt_icon.ICO')
         popup.iconbitmap(icon_path)
         popup.resizable(False, False)
+        popup.transient(root)  # stay above the main window while tuning
 
         sv = self.model.state.toolbar.analysis
         frame = tk.Frame(popup)
@@ -5551,7 +5592,8 @@ class Controller:
             frame,
             text=(
                 "Applies to images loaded from file only.\n"
-                "Smoothing changes the analysed image; the colormap is display-only."
+                "Smoothing changes the analysed image; the colormap is display-only.\n"
+                "Note: smoothing destroys the signal that Texture mode measures."
             ),
             justify=tk.LEFT,
             font=(default_font, 10),
@@ -5589,6 +5631,7 @@ class Controller:
         icon_path = os.path.join(images_folder, 'vt_icon.ICO')
         popup.iconbitmap(icon_path)
         popup.resizable(False, False)
+        popup.transient(root)  # stay above the main window while tuning
 
         try:
             cam.start_acquisition()
@@ -5752,6 +5795,7 @@ class Controller:
         icon_path = os.path.join(images_folder, 'vt_icon.ICO')
         popup.iconbitmap(icon_path)
         popup.resizable(False, False)
+        popup.transient(root)  # stay above the main window while tuning
 
         frame = tk.Frame(popup)
         frame.pack(padx=12, pady=10)
@@ -6199,25 +6243,21 @@ def initialize_controller():
     global app
     app = Controller(root, mmc)  # Initialize the controller (WITHOUT launching VasoTrackerSplashScreen)
 
-    # Make window fully transparent, zoom and lay out, then reveal
-    root.attributes('-alpha', 0)
-    root.deiconify()
-    root.state('zoomed')
+    # The window must never be mapped until it is fully built and drawn:
+    # state('zoomed') maps a window immediately, so instead the layout is
+    # performed at full-screen geometry while the window is still WITHDRAWN
+    # (the loading splash covers the wait), all deferred CustomTkinter
+    # draws are given time to complete invisibly, and only then is the
+    # finished window shown and snapped to its maximised state. No
+    # transparency tricks - an unmapped window cannot flash anything.
+    sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
+    root.geometry(f"{sw}x{sh}+0+0")
     root.update_idletasks()
-    # Force toolbar min height now (widget is drawn but invisible)
+    # Force toolbar min height now (widgets are laid out but invisible)
     toolbar_h = app.view.toolbar.winfo_height()
     app.view.grid_rowconfigure(0, weight=2, minsize=toolbar_h, uniform="row")
     root.update_idletasks()
-    rootsplash.destroy()  # Remove the loading splash screen
 
-    # NOTE: CustomTkinter performs widget drawing in deferred after()
-    # callbacks, which update_idletasks() does NOT flush. Revealing the
-    # window while those draws are still landing shows half-drawn widgets -
-    # most visibly the switch tracks painting their red base layer before
-    # the green progress layer ("red flashing" on startup). A fixed delay
-    # is a race on slow/busy machines, so instead reveal once the UI has
-    # been quiet (no widget configure/draw activity) for a settling period,
-    # with a hard cap so the window can never fail to appear.
     _reveal = {"last_activity": time.time(), "started": time.time(), "done": False}
 
     def _note_ui_activity(event=None):
@@ -6225,14 +6265,33 @@ def initialize_controller():
 
     root.bind_all("<Configure>", _note_ui_activity, add="+")
 
+    def _restore_switch_off_colour(widget):
+        # The theme ships the switch OFF-track in neutral gray so startup
+        # draws can never flash red regardless of timing. The red off-state
+        # colour is applied here, after startup, when the switches are ON
+        # and their tracks are hidden behind the green progress layer.
+        try:
+            for child in widget.winfo_children():
+                if isinstance(child, ctk.CTkSwitch):
+                    child.configure(fg_color="#AE1917")
+                _restore_switch_off_colour(child)
+        except Exception:
+            traceback.print_exc()
+
     def _try_reveal():
         if _reveal["done"]:
             return
         quiet_for = time.time() - _reveal["last_activity"]
         total = time.time() - _reveal["started"]
-        if quiet_for >= 0.4 or total >= 4.0:
+        # Generous minimum: the window is invisible behind the loading
+        # splash, so waiting costs nothing and guarantees the deferred
+        # draws have landed even on a busy machine.
+        if (total >= 1.5 and quiet_for >= 0.5) or total >= 5.0:
             _reveal["done"] = True
-            root.attributes('-alpha', 1)
+            rootsplash.destroy()  # Remove the loading splash screen
+            root.deiconify()
+            root.state('zoomed')
+            root.after(800, lambda: _restore_switch_off_colour(root))
         else:
             root.after(100, _try_reveal)
 
