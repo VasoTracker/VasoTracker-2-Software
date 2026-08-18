@@ -18,6 +18,65 @@ from scipy import ndimage
 # EDIT AT YOUR OWN RISK
 
 
+def local_std_profile(profile, window=9):
+    """Rolling standard deviation of an intensity profile. Fibrous vessels
+    barely differ from background in mean intensity but differ hugely in
+    texture, so their walls appear as steps in this signal."""
+    p = np.asarray(profile, dtype=np.float64)
+    m = ndimage.uniform_filter1d(p, window, mode="nearest")
+    m2 = ndimage.uniform_filter1d(p * p, window, mode="nearest")
+    return np.sqrt(np.maximum(m2 - m * m, 0.0))
+
+
+def texture_changepoints(signal, min_seg=5, i_range=None, j_range=None):
+    """Optimal two-changepoint split of `signal` into three constant
+    segments (minimum total squared error): quiet background - textured
+    vessel - quiet background. Thresholdless and immune to interior texture
+    by construction. Optional (lo, hi) index ranges constrain each
+    changepoint's search (used by consensus/temporal repair).
+
+    Returns (i, j) with i < j, or None if no valid split exists.
+    """
+    s = np.asarray(signal, dtype=np.float64)
+    n = len(s)
+    if n < 3 * min_seg:
+        return None
+    c1 = np.concatenate([[0.0], np.cumsum(s)])
+    c2 = np.concatenate([[0.0], np.cumsum(s * s)])
+
+    def seg_cost(a, b):
+        length = np.maximum(b - a, 1)
+        tot = c1[b] - c1[a]
+        tot2 = c2[b] - c2[a]
+        return tot2 - tot * tot / length
+
+    i_lo, i_hi = min_seg, n - 2 * min_seg
+    j_lo_all, j_hi = None, n - min_seg
+    if i_range is not None:
+        i_lo = max(i_lo, int(i_range[0]))
+        i_hi = min(i_hi, int(i_range[1]))
+    if i_hi <= i_lo:
+        return None
+
+    best_i, best_j, best_cost = None, None, np.inf
+    for i in range(i_lo, i_hi):
+        j_lo = i + min_seg
+        j_hi_eff = j_hi
+        if j_range is not None:
+            j_lo = max(j_lo, int(j_range[0]))
+            j_hi_eff = min(j_hi_eff, int(j_range[1]))
+        if j_hi_eff <= j_lo:
+            continue
+        j = np.arange(j_lo, j_hi_eff)
+        cost = seg_cost(0, i) + seg_cost(i, j) + seg_cost(j, n)
+        k = int(np.argmin(cost))
+        if cost[k] < best_cost:
+            best_i, best_j, best_cost = i, int(j[k]), float(cost[k])
+    if best_i is None:
+        return None
+    return best_i, best_j
+
+
 def detect_vessel_orientation(image, blur_sigma=3):
     """Return True when the vessel runs horizontally across the image, i.e.
     the 90-degree (rotated) analysis mode should be enabled.

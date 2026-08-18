@@ -212,6 +212,8 @@ class AnalysisPaneState:
     gauss_sigma: DoubleVar = field(default_factory=DoubleVar)
     temporal_frames: IntVar = field(default_factory=IntVar)
     colormap: StringVar = field(default_factory=StringVar)
+    # Fibrous-tissue detection mode (texture changepoints, see VT_Diameter)
+    texture_tracking: BooleanVar = field(default_factory=BooleanVar)
 
 
 @dataclass
@@ -797,6 +799,7 @@ def compute_diameters_and_rasterise(
     filter_diams: bool,
     rotate_tracking: bool,
     ultrasound_tracking: bool,
+    texture_tracking: bool = False,
     colormap: str = "Gray",
     edge_prior=None,
 ):
@@ -817,6 +820,7 @@ def compute_diameters_and_rasterise(
         filter_means=filter_diams,
         rotate_tracking=rotate_tracking,
         ultrasound_tracking=ultrasound_tracking,
+        texture_tracking=texture_tracking,
         edge_prior=edge_prior,
     )
 
@@ -973,6 +977,7 @@ class Model:
         tb.analysis.gauss_sigma.set(0.0)
         tb.analysis.temporal_frames.set(1)
         tb.analysis.colormap.set("Gray")
+        tb.analysis.texture_tracking.set(False)
 
         tb.caliper_roi.roi_flag.set("ROI")
 
@@ -1187,6 +1192,7 @@ class Model:
                 filter_diams=tb.analysis.filter.get(),
                 rotate_tracking=tb.analysis.rotate_tracking.get(),
                 ultrasound_tracking=tb.analysis.ultrasound_tracking.get(),
+                texture_tracking=tb.analysis.texture_tracking.get(),
                 colormap=display_cmap,
             )
             self.complete_processing(result)
@@ -1207,6 +1213,7 @@ class Model:
                 filter_diams=tb.analysis.filter.get(),
                 rotate_tracking=tb.analysis.rotate_tracking.get(),
                 ultrasound_tracking=tb.analysis.ultrasound_tracking.get(),
+                texture_tracking=tb.analysis.texture_tracking.get(),
                 colormap=display_cmap,
             )
             self.futures_to_resolve.append(FutureAndCallbackFlag(future))
@@ -1273,6 +1280,7 @@ class Model:
                     filter_diams=tb.analysis.filter.get(),
                     rotate_tracking=tb.analysis.rotate_tracking.get(),
                     ultrasound_tracking=tb.analysis.ultrasound_tracking.get(),
+                    texture_tracking=tb.analysis.texture_tracking.get(),
                     colormap=tb.analysis.colormap.get() if is_file_cam else "Gray",
                     edge_prior=self._prev_edges,
                 )
@@ -2017,6 +2025,7 @@ class Model:
             filter_means=filter_diams,
             rotate_tracking=tb.analysis.rotate_tracking.get(),
             ultrasound_tracking=tb.analysis.ultrasound_tracking.get(),
+            texture_tracking=tb.analysis.texture_tracking.get(),
         )
         is_file_cam = self.state.camera is not None and self.state.camera.camera_name == "Image from file"
         display_cmap = tb.analysis.colormap.get() if is_file_cam else "Gray"
@@ -2630,6 +2639,9 @@ class AnalysisSettingsPane(ToolbarPane):
 
         self.org_entry = ctk.CTkCheckBox(self.checkboxes_frame, text="US", font=(default_font, default_font_size), variable=sv.ultrasound_tracking, checkbox_height=checkbox_height, checkbox_width=checkbox_width)
         self.org_entry.grid(row=1, column=2, padx=padx, pady=pady, sticky=tk.NS)  # Moved to the third column for consistency
+
+        self.texture_entry = ctk.CTkCheckBox(self.checkboxes_frame, text="Fib", font=(default_font, default_font_size), variable=sv.texture_tracking, checkbox_height=checkbox_height, checkbox_width=checkbox_width)
+        self.texture_entry.grid(row=2, column=0, padx=padx, pady=pady, sticky=tk.NS)
 
         # Create a single tooltip instance for the container
         tooltip = ToolTip(self)
