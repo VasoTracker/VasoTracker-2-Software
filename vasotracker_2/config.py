@@ -32,8 +32,9 @@ class AcquisitionSettings(Configurator):
     pixel_world_scale: float = 1.0
     exposure: int = 50
     pixel_clock: int = 10
-    recording_interval: float = 300.0
+    recording_interval: float = 10.0
     target_fps: float = 10.0  # Target frame rate in Hz
+    save_overlay: bool = True  # also write the tracked-overlay TIFF stack
 
     def set_values(self, state: "VtState"):
         acq = state.toolbar.acq
@@ -42,21 +43,21 @@ class AcquisitionSettings(Configurator):
         acq.pixel_clock.set(self.pixel_clock)
         acq.rec_interval.set(self.recording_interval)
         acq.target_fps.set(self.target_fps)
+        state.toolbar.start_stop.save_overlay.set(self.save_overlay)
 
     @classmethod
     def from_state(cls, state: "VtState"):
+        # Coerce to the declared field types: several of these live in the UI as
+        # IntVars, and dumping them straight back rewrites "300.0" as "300" etc.
+        # on every save, churning settings.toml for no reason.
         acq = state.toolbar.acq
-        scale = acq.scale.get()
-        exposure = acq.exposure.get()
-        pixel_clock = acq.pixel_clock.get()
-        recording_interval = acq.rec_interval.get()
-        target_fps = acq.target_fps.get()
         return cls(
-            pixel_world_scale=scale,
-            exposure=exposure,
-            pixel_clock=pixel_clock,
-            recording_interval=recording_interval,
-            target_fps=target_fps,
+            pixel_world_scale=float(acq.scale.get()),
+            exposure=int(acq.exposure.get()),
+            pixel_clock=int(acq.pixel_clock.get()),
+            recording_interval=float(acq.rec_interval.get()),
+            target_fps=float(acq.target_fps.get()),
+            save_overlay=bool(state.toolbar.start_stop.save_overlay.get()),
         )
 
 
@@ -78,15 +79,11 @@ class AnalysisSettings(Configurator):
     @classmethod
     def from_state(cls, state: "VtState"):
         ana = state.toolbar.analysis
-        num_lines = ana.num_lines.get()
-        smooth = ana.smooth_factor.get()
-        integration = ana.smooth_factor.get()
-        threshold = ana.thresh_factor.get()
         return cls(
-            num_lines=num_lines,
-            smooth=smooth,
-            integration=integration,
-            threshold=threshold,
+            num_lines=int(ana.num_lines.get()),
+            smooth=int(ana.smooth_factor.get()),
+            integration=int(ana.integration_factor.get()),
+            threshold=float(ana.thresh_factor.get()),
         )
 
 
@@ -111,12 +108,12 @@ class GraphAxisSettings(Configurator):
     def from_state(cls, state: "VtState"):
         g = state.toolbar.graph
         return cls(
-            x_min=g.x_min.get(),
-            x_max=g.x_max.get(),
-            y_min1=g.y_min_od.get(),
-            y_max1=g.y_max_od.get(),
-            y_min2=g.y_min_id.get(),
-            y_max2=g.y_max_od.get(),
+            x_min=float(g.x_min.get()),
+            x_max=float(g.x_max.get()),
+            y_min1=float(g.y_min_od.get()),
+            y_max1=float(g.y_max_od.get()),
+            y_min2=float(g.y_min_id.get()),
+            y_max2=float(g.y_max_id.get()),
         )
 
 
@@ -180,19 +177,14 @@ class PressureControlSettings(Configurator):
     @classmethod
     def from_state(cls, state: "VtState"):
         p = state.toolbar.pressure_protocol
-        start_p = p.pressure_start.get()
-        stop_p = p.pressure_stop.get()
-        p_interval = p.pressure_intvl.get()
-        t_interval = p.time_intvl.get()
-
-        s = state.toolbar.servo
-        default_pressure = s.set_pressure.get()
+        # default_pressure mirrors set_values, which writes it to
+        # pressure_protocol.set_pressure (not the servo's live set point).
         return cls(
-            default_pressure=default_pressure,
-            time_interval=t_interval,
-            start_pressure=start_p,
-            stop_pressure=stop_p,
-            pressure_interval=p_interval,
+            default_pressure=float(p.set_pressure.get()),
+            time_interval=float(p.time_intvl.get()),
+            start_pressure=float(p.pressure_start.get()),
+            stop_pressure=float(p.pressure_stop.get()),
+            pressure_interval=float(p.pressure_intvl.get()),
         )
 
 @dataclass
@@ -212,6 +204,23 @@ class RegistrationSettings:
     register_flag: int = 0
     neveragain_flag: int = 0
 
+
+@dataclass
+class MicroManagerSettings(Configurator):
+    # Micro-Manager system configuration (.cfg) loaded when the "MMConfig"
+    # camera is selected. Empty string means auto-resolve: the MMConfig.cfg
+    # sitting next to the active Micro-Manager install, else the placeholder
+    # bundled with VasoTracker. Set via the config chooser dialog that opens
+    # when "MMConfig" is picked in the camera dropdown.
+    config_file: str = ""
+
+    def set_values(self, state: "VtState"):
+        state.toolbar.acq.mm_config_file.set(self.config_file)
+
+    @classmethod
+    def from_state(cls, state: "VtState"):
+        return cls(config_file=state.toolbar.acq.mm_config_file.get())
+
 @dataclass
 class Config(Configurator):
     acquisition: AcquisitionSettings = field(default_factory=AcquisitionSettings)
@@ -225,6 +234,7 @@ class Config(Configurator):
     TIS_DCAM: TisDcamSettings = field(default_factory=TisDcamSettings)
     proxy_camera: ProxyCameraSettings = field(default_factory=ProxyCameraSettings)
     registration: RegistrationSettings = field(default_factory=RegistrationSettings)
+    micromanager: MicroManagerSettings = field(default_factory=MicroManagerSettings)
 
     path: Optional[str] = None
 
@@ -235,13 +245,39 @@ class Config(Configurator):
         result.path = str(path)
         return result
 
+    @classmethod
+    def load(cls, bundled_path: Union[str, Path],
+             user_path: Union[str, Path]) -> "Config":
+        """The bundled settings.toml is the base; an optional per-user
+        settings.toml is layered on top. Runtime writes go to the user file
+        (``self.path``), so the shipped defaults - and a read-only Program
+        Files install - are never modified."""
+        data: dict = {}
+        try:
+            data = toml.load(bundled_path)
+        except Exception:
+            pass
+        user_path = Path(user_path)
+        if user_path.is_file():
+            def _merge(base: dict, over: dict):
+                for k, v in over.items():
+                    if isinstance(v, dict) and isinstance(base.get(k), dict):
+                        _merge(base[k], v)
+                    else:
+                        base[k] = v
+            try:
+                _merge(data, toml.load(user_path))
+            except Exception:
+                pass
+        result = dacite.from_dict(data_class=cls, data=data)
+        result.path = str(user_path)
+        return result
+
     def save(self, override_path: Optional[Union[str, Path]] = None):
-        path = self.path
-        if override_path is not None:
-            path = override_path
+        path = Path(override_path if override_path is not None else self.path)
+        path.parent.mkdir(parents=True, exist_ok=True)
         data = asdict(self)
-        if self.path is not None:
-            del data["path"]
+        data.pop("path", None)
         with open(path, "w") as f:
             toml.dump(data, f)
 

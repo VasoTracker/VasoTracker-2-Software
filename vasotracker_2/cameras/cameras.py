@@ -17,8 +17,16 @@ import sys
 # The following is so that the required resources are included in the PyInstaller build.
 # Utility functions
 def get_resource_path(relative_path):
-    """Get the path to a resource, whether it's bundled with PyInstaller or not."""
-    base_path = getattr(sys, '_MEIPASS', os.path.abspath("."))
+    """Get the path to a resource, whether it's bundled with PyInstaller or not.
+
+    Frozen: next to the exe (sys._MEIPASS). From source: the .cfg files live in
+    the vasotracker_2 folder, i.e. the parent of this cameras/ package - not the
+    current working directory.
+    """
+    base_path = getattr(
+        sys, "_MEIPASS",
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    )
     return os.path.join(base_path, relative_path)
 
 
@@ -193,7 +201,7 @@ class MManagerCamera(CameraBase, camera_name="MMConfig"):
         super().__init__(mmc, state, config)
 
         config_loaded = False
-        config_path = get_resource_path("MMConfig.cfg")
+        config_path = self._resolve_config_path(state)
         try:
             print(f"Current Working Directory: {os.getcwd()}")
             print(f"Looking for file here: {config_path}")
@@ -217,6 +225,37 @@ class MManagerCamera(CameraBase, camera_name="MMConfig"):
             #self.set_property("PixelType", "8bit")
             exposure = state.toolbar.acq.exposure.get()
             self.set_exposure(exposure)
+
+    @staticmethod
+    def _resolve_config_path(state):
+        """Pick the Micro-Manager .cfg to load, in order:
+        1. the path chosen in the Acquisition Settings pane (settings.toml), if set
+        2. MMConfig.cfg sitting next to the active Micro-Manager install
+        3. the placeholder bundled with VasoTracker
+        """
+        try:
+            chosen = state.toolbar.acq.mm_config_file.get().strip()
+        except Exception:
+            chosen = ""
+        if chosen and os.path.isfile(chosen):
+            print(f"MMConfig: using configured path: {chosen}")
+            return chosen
+        if chosen:
+            print(f"MMConfig: configured path missing ({chosen}), falling back")
+
+        try:
+            mm_path = find_micromanager()
+            if mm_path:
+                candidate = os.path.join(mm_path, "MMConfig.cfg")
+                if os.path.isfile(candidate):
+                    print(f"MMConfig: using Micro-Manager install config: {candidate}")
+                    return candidate
+        except Exception:
+            traceback.print_exc()
+
+        bundled = get_resource_path("MMConfig.cfg")
+        print(f"MMConfig: using bundled config: {bundled}")
+        return bundled
 
 
     def get_image(self):

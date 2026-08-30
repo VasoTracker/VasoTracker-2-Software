@@ -99,8 +99,8 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    uac_admin=True,
-    icon='D:\\OneDrive - University of Strathclyde\\Documents\\GitHub\\VasoTracker-2-Software\\vasotracker_2\\images\\vt_icon.ico',
+    uac_admin=False,
+    icon=os.path.join(spec_dir, 'images', 'vt_icon.ico'),
 )
 coll = COLLECT(
     exe,

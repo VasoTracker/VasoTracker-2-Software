@@ -2,8 +2,9 @@
 pixel_world_scale = 1.0
 exposure = 50
 pixel_clock = 10
-recording_interval = 300.0
+recording_interval = 10.0
 target_fps = 10.0
+save_overlay = true
 
 [analysis]
 num_lines = 10
@@ -45,3 +46,6 @@ max_frame = 300
 [registration]
 register_flag = 0
 neveragain_flag = 1
+
+[micromanager]
+config_file = ""

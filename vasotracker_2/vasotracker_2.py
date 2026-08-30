@@ -68,6 +68,8 @@ import os
 from collections import deque
 from concurrent.futures import Future, ProcessPoolExecutor
 import csv
+import glob
+import platformdirs
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from enum import IntEnum, auto
@@ -142,6 +144,13 @@ NUM_ROIS = 10
 ELLIPSIS = "..."
 CMAP = plt.get_cmap("tab10")
 
+# Lossless compression for the recorded Raw/Result TIFF stacks. "zlib"
+# (Adobe Deflate, TIFF compression 8) needs no extra packages and is read
+# natively by ImageJ/Fiji. On real vessel images it roughly halves the raw
+# stack and shrinks the mostly-flat Result overlay 3x+. Set to None for
+# uncompressed. ~15-25 ms/frame - negligible at time-lapse intervals.
+TIFF_COMPRESSION = "zlib"
+
 C1 = (0, 0, 200) #Blue outer
 C2 = (0,125, 0) #Dark green inner
 C3 = (20, 20, 20)
@@ -159,8 +168,14 @@ entry_disabled_color="#E8E8E8"
 # The following is so that the required resources are included in the PyInstaller build.
 # Utility functions
 def get_resource_path(relative_path):
-    """Get the path to a resource, whether it's bundled with PyInstaller or not."""
-    base_path = getattr(sys, '_MEIPASS', os.path.abspath("."))
+    """Get the path to a resource, whether it's bundled with PyInstaller or not.
+
+    Frozen builds unpack bundled data next to the exe (sys._MEIPASS). Running
+    from source, resources sit next to this file - anchoring on the current
+    working directory instead means every icon/image load breaks unless the
+    app is launched from inside the vasotracker_2 folder.
+    """
+    base_path = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
     return os.path.join(base_path, relative_path)
 
 
@@ -194,6 +209,8 @@ class AcquisitionPaneState:
     fast_mode: BooleanVar = field(default_factory=BooleanVar)
     res: StringVar = field(default_factory=StringVar)
     fov: StringVar = field(default_factory=StringVar)
+    # Micro-Manager .cfg path for the "MMConfig" camera ("" = auto-resolve)
+    mm_config_file: StringVar = field(default_factory=StringVar)
 
 
 @dataclass
@@ -239,6 +256,9 @@ class PlottingPaneState:
     line_show: List[BooleanVar] = field(
         default_factory=lambda: [BooleanVar() for _ in range(NUM_LINES)]
     )
+    # Draw the ROI/line numbers on the live image (off by default). The
+    # numbered reference still (_ROIs.png) is saved regardless.
+    show_roi_numbers: BooleanVar = field(default_factory=BooleanVar)
     outer_diam_roi: Dict[str, List[float]] = field(default_factory=dict)
     inner_diam_roi: Dict[str, List[float]] = field(default_factory=dict)
     
@@ -302,6 +322,9 @@ class PressureProtocolSettingsState:
 @dataclass
 class StartStopState:
     record: BooleanVar = field(default_factory=BooleanVar)
+    # Also write the tracked-overlay stack (_Result_*.tiff) alongside the raw
+    # stack. Off = raw + CSV only (the overlay is reconstructable from those).
+    save_overlay: BooleanVar = field(default_factory=lambda: BooleanVar(value=True))
 
 
 @dataclass
@@ -457,6 +480,7 @@ class CsvListWrapper(list):
 
 @dataclass
 class MeasureStore:
+    frames: List[int] = field(default_factory=list)
     times: List[float] = field(default_factory=list)
     formatted_times: List[float] = field(default_factory=list)
     outer_diam: List[float] = field(default_factory=list)
@@ -480,6 +504,7 @@ class MeasureStore:
 
     def append(
         self,
+        frame: int,
         t: float,
         od: float,
         id: float,
@@ -496,6 +521,7 @@ class MeasureStore:
         ods_valid: np.ndarray,
         ids_valid: np.ndarray,
     ):
+        self.frames.append(int(frame))
         self.times.append(round(t, 1))
         self.formatted_times.append(time.strftime("%H:%M:%S", time.gmtime(np.round(t, 1))))
         self.outer_diam.append(od)
@@ -514,6 +540,7 @@ class MeasureStore:
         self.inner_diam_good.append(ids_valid)
 
         if self.max_len is not None and len(self.times) > self.max_len:
+            self.frames = self.frames[-self.max_len :]
             self.times = self.times[-self.max_len :]
             self.formatted_times = self.formatted_times[-self.max_len :]
             self.outer_diam = self.outer_diam[-self.max_len :]
@@ -532,6 +559,7 @@ class MeasureStore:
 
     def get_last_row(self):
         return (
+            self.frames[-1],
             self.times[-1],
             self.formatted_times[-1],
             self.outer_diam[-1],
@@ -551,6 +579,7 @@ class MeasureStore:
 
     def headers(self):
         return (
+            "Frame",
             "Time (s)",
             "Time (hh:mm:ss)",
             "Outer Diameter",
@@ -569,6 +598,7 @@ class MeasureStore:
         )
 
     def clear(self):
+        self.frames.clear()
         self.times.clear()
         self.formatted_times.clear()
         self.outer_diam.clear()
@@ -622,6 +652,67 @@ class VtState:
     pressure_controller: Optional[PressureController] = None
     servo: ServoSettingsState = field(default_factory=ServoSettingsState)
     pressure_protocol: PressureProtocolSettingsState = field(default_factory=PressureProtocolSettingsState)
+
+
+def _put_roi_label(result, n, x, y, colour, scale=0.8):
+    """Draw a 1-based index for an ROI/line so it can be matched to its column
+    in the results CSV (and the _ROIs.csv sidecar / _ROIs.png reference image).
+    The origin is clamped so the whole glyph stays on the image (cv2's origin
+    is the text's bottom-left, so it extends up and to the right), and a dark
+    halo keeps it readable over any background."""
+    h, w = result.shape[:2]
+    txt = str(n)
+    thick = max(1, int(round(2 * scale)))
+    (tw, th), base = cv2.getTextSize(txt, cv2.FONT_HERSHEY_SIMPLEX, scale, thick)
+    try:
+        px = int(min(max(float(x), 1), max(1, w - tw - 1)))
+        py = int(min(max(float(y), th + 1), h - base - 1))
+    except (TypeError, ValueError):
+        return
+    cv2.putText(result, txt, (px, py), cv2.FONT_HERSHEY_SIMPLEX, scale, (0, 0, 0),
+                thick + 2, cv2.LINE_AA)
+    cv2.putText(result, txt, (px, py), cv2.FONT_HERSHEY_SIMPLEX, scale, colour,
+                thick, cv2.LINE_AA)
+
+
+def draw_roi_labels(image, state, diams=None, rotate_tracking=True):
+    """Return a copy of `image` with each drawn box / caliper line / scan line
+    numbered (1-based), matching the order of the results-CSV Profiles columns.
+    Kept separate from rasterise_camera_state so the numbers can go on the live
+    view and the _ROIs.png reference without ending up in every saved frame."""
+    out = np.copy(image)
+    ny, nx = out.shape[:2]
+    cmap = CMAP.colors
+    # Text scale relative to image size - a fixed scale is unreadable-huge on a
+    # 128 px sample and tiny on a 2448 px camera frame.
+    scale = float(np.clip(min(ny, nx) / 600.0, 0.4, 1.1))
+    off = max(3, int(14 * scale))
+    for idx, roi in enumerate(state.multi_roi.values()):
+        colour = [int(255 * c) for c in cmap[idx % len(cmap)]]
+        x1, y1, x2, y2 = roi.fixed_corners()
+        _put_roi_label(out, idx + 1, min(x1, x2) + 2, min(y1, y2) + off + 4, colour, scale)
+    for idx, cal in enumerate(state.autocaliper.values()):
+        colour = [int(255 * c) for c in cmap[idx % len(cmap)]]
+        _put_roi_label(out, idx + 1, cal.x1 + 3, cal.y1 - 3, colour, scale)
+    if not state.multi_roi and not state.autocaliper and diams is not None:
+        for idx in range(int(diams.outer_diam_x.shape[0])):
+            od_x = np.asarray(diams.outer_diam_x[idx], dtype=float)
+            od_y = np.asarray(diams.outer_diam_y[idx], dtype=float)
+            if not np.all(np.isfinite(od_x)) or np.all(od_x == 0):
+                continue
+            if rotate_tracking:
+                # 90-degree mode: the outer bar runs across a horizontal vessel,
+                # bars stacked left-to-right - number sits just above each bar.
+                bx, by = nx - od_y, od_x
+                lx = (bx[0] + bx[1]) / 2
+                ly = min(by[0], by[1]) - off
+            else:
+                # Normal mode: bars horizontal, stacked top-to-bottom - number
+                # to the left of each bar.
+                lx = min(od_x[0], od_x[1]) - off
+                ly = (od_y[0] + od_y[1]) / 2 + off
+            _put_roi_label(out, idx + 1, lx, ly, (255, 255, 255), scale)
+    return out
 
 
 def rasterise_camera_state(
@@ -885,6 +976,16 @@ class Model:
         self.queue = queue.Queue()
         self.mmc = mmc
         self.config_path = "settings.toml"
+        # Bundled settings.toml is the read-only base; a per-user copy in the
+        # OS config dir holds anything written at runtime (registration state,
+        # the chosen MMConfig, "Save settings"). The packaged app installs to
+        # Program Files and runs un-elevated, so it must never write its own
+        # bundled copy.
+        self.bundled_config_path = get_resource_path(self.config_path)
+        self.user_config_path = str(
+            Path(platformdirs.user_config_dir("VasoTracker", appauthor=False))
+            / self.config_path
+        )
         self.current_table_row = 1  # Initialize row number to 0
 
         # Temporal consistency state for flow-artefact rejection
@@ -907,19 +1008,25 @@ class Model:
         self.output_stem2 = None  # Base name for result files (without extension)
         self.output_stem = None   # Base stem from setup_output_files
         self.output_dir = None    # Output directory from setup_output_files
+        # Per-line output + ROI-change tracking (see write_line_row / _roi_signature)
+        self.lines_file = None
+        self.lines_writer = None
+        self.roi_log_file = None
+        self.roi_log_writer = None
+        self._roi_sig = None      # signature of the current ROI layout
 
 
         try:
-            self.configure = Config.from_file(Path(__file__).parent / self.config_path)
+            self.configure = Config.load(self.bundled_config_path, self.user_config_path)
         except:
             traceback.print_exc()
             self.state.message.type = MessageType.Warning
             self.state.message.title = "Failed to load config"
             self.state.message.message = (
-                f"Failed to load config from path... loading defaults: {Path(__file__).parent / self.config_path}."
+                f"Failed to load config, using defaults. Base: {self.bundled_config_path}"
             )
             self.state.message.dirty.set(True)
-            self.configure = Config(path=self.config_path)
+            self.configure = Config(path=self.user_config_path)
 
         self.configure.set_values(self.state)
         self.setup_thread_pool()
@@ -931,6 +1038,13 @@ class Model:
         self.prev_update = 0.0
         self.time_elapsed = 0.0
         self.frame_count = 0
+        # Elapsed time of the last time-lapse frame written (None = none yet
+        # this tracking session, so the next frame is saved immediately).
+        self._last_record_t = None
+        # Whether the _ROIs.png / _ROIs.csv reference has been written this run.
+        self._roi_ref_written = False
+        # Wall-clock of the last fsync of the output files (throttle).
+        self._last_fsync_t = 0.0
 
         self.setup_default_ui_state()
 
@@ -968,6 +1082,28 @@ class Model:
         self.table_writer = csv.writer(self.table_file)
         self.table_writer.writerow(self.state.table.headers())
         self.table_file.flush()
+
+        # Per-line diameters, one wide row per recorded frame. Fixed column
+        # count so adding/removing an ROI mid-run never reshapes the file; the
+        # meaning of L1..LN for a given frame is in _ROIs[_fNNNNNN].csv.
+        stem_path = os.path.splitext(output_path)[0]
+        self.lines_file = open(stem_path + "_lines.csv", "w", newline="")
+        self.lines_writer = csv.writer(self.lines_file)
+        self.lines_writer.writerow(
+            ["Frame", "Time (s)", "Mode", "ROI_Change"]
+            + [f"OD_L{i+1}" for i in range(NUM_LINES)]
+            + [f"ID_L{i+1}" for i in range(NUM_LINES)]
+        )
+        self.lines_file.flush()
+
+        # Timeline of ROI-layout changes during the recording.
+        self.roi_log_file = open(stem_path + "_ROIs_log.csv", "w", newline="")
+        self.roi_log_writer = csv.writer(self.roi_log_file)
+        self.roi_log_writer.writerow(
+            ["Frame", "Time (s)", "Event", "Mode", "N_regions", "Reference"]
+        )
+        self.roi_log_file.flush()
+        self._roi_sig = None
 
         tb = self.state.toolbar
         tb.source.path.set(self.output_dir)
@@ -1030,6 +1166,13 @@ class Model:
 
     def to_config(self):
         config = Config.from_state(self.state)
+        # Sections that have no UI-state backing (Config.from_state rebuilds
+        # them from defaults) - carry the currently-loaded values through so a
+        # save doesn't silently reset them.
+        config.registration = self.configure.registration
+        config.TIS_DCAM = self.configure.TIS_DCAM
+        config.proxy_camera = self.configure.proxy_camera
+        config.path = self.configure.path
         return config
 
     def get_shutdown_callback(self):
@@ -1059,6 +1202,16 @@ class Model:
             except:
                 pass
             self.table_file = None
+        for _attr in ("lines_file", "roi_log_file"):
+            _f = getattr(self, _attr, None)
+            if _f is not None:
+                try:
+                    _f.close()
+                except Exception:
+                    pass
+                setattr(self, _attr, None)
+        self.lines_writer = None
+        self.roi_log_writer = None
 
     def register_callbacks(self):
         tb = self.state.toolbar
@@ -1166,6 +1319,16 @@ class Model:
                 tb.data_acq.caliper_length.set(cal.length * scale)
 
         tb.acq.scale.trace_add("write", update_scale)
+
+        def _refresh_on_number_toggle(*args):
+            # Repaint a paused/file view immediately when the "number ROIs"
+            # checkbox changes (the live stream picks it up on the next frame).
+            if not self.acquiring:
+                try:
+                    self.rerasterise_current_image()
+                except Exception:
+                    pass
+        tb.plotting.show_roi_numbers.trace_add("write", _refresh_on_number_toggle)
 
     def process_images(self):
         got_im = False
@@ -1343,7 +1506,23 @@ class Model:
             self.state.diameters = result.diameters
             # Always update image data so latest frame is available
             self.state.cam_show.raw_im_data = result.raw_im
+            # Optionally number the ROIs/lines on the live view (Settings ->
+            # Show/Hide Traces). Off by default; the clean result.rasterised is
+            # what gets recorded, and the _ROIs.png reference is saved either way.
+            _rds = self.state.cam_show.raster_draw_state
+            _n_lines = result.diameters.outer_diam_x.shape[0] if result.diameters is not None else 0
             self.state.cam_show.im_data = result.rasterised
+            if (
+                tb.plotting.show_roi_numbers.get()
+                and (_rds.multi_roi or _rds.autocaliper or _n_lines > 1)
+            ):
+                try:
+                    self.state.cam_show.im_data = draw_roi_labels(
+                        result.rasterised, _rds, result.diameters,
+                        tb.analysis.rotate_tracking.get(),
+                    )
+                except Exception:
+                    traceback.print_exc()
             # Toggle dirty to ensure trace fires (trace only fires on value change)
             self.state.cam_show.dirty.set(False)
             self.state.cam_show.dirty.set(True)
@@ -1365,11 +1544,50 @@ class Model:
             record_data = self.state.toolbar.start_stop.record.get()
             rec_interval = self.state.toolbar.acq.rec_interval.get()
 
-            # rec_interval=0 means record every frame, otherwise record at interval
-            should_save = rec_interval == 0 or int(self.time_elapsed) % rec_interval == 0
-            if record_data and should_save:
-                # Save both images together (ensures synchronized file rotation)
-                self.save_images(raw_image=result.raw_im, result_image=result.rasterised)
+            # Time-lapse image saving. Gate on elapsed time since the last saved
+            # frame, not `int(elapsed) % interval` - the modulo only fired when a
+            # frame landed exactly on a whole-second multiple, so above 1 fps it
+            # saved a burst and a single dropped frame near the boundary skipped
+            # the whole interval. (For "Image from file", time_elapsed is a frame
+            # count, so this is "every N frames".)
+            if self._last_record_t is not None and self.time_elapsed < self._last_record_t:
+                # Elapsed time went backwards: a new tracking session started.
+                self._last_record_t = None
+                self._roi_ref_written = False
+                self._roi_sig = None
+            if record_data and (
+                rec_interval <= 0
+                or self._last_record_t is None
+                or self.time_elapsed - self._last_record_t >= rec_interval
+            ):
+                # Per-recorded-frame ROI bookkeeping: on the first frame (and
+                # whenever a box/line is added/removed/moved or the mode
+                # changes) write a numbered reference image + _ROIs[_fN].csv and
+                # log it; then write the wide per-line row to _lines.csv.
+                roi_changed = False
+                try:
+                    roi_changed = self.check_roi_change(
+                        result.frame_id, self.time_elapsed, result.raw_im,
+                        result.diameters, tb.analysis.rotate_tracking.get(),
+                    )
+                except Exception:
+                    traceback.print_exc()
+                try:
+                    self.write_line_row(result.frame_id, self.time_elapsed,
+                                        result.diameters, roi_changed)
+                except Exception:
+                    traceback.print_exc()
+
+                # Save both images together (ensures synchronized file rotation).
+                # The tracked-overlay stack is optional - raw + CSV is enough to
+                # regenerate it, and dropping it roughly halves the footprint.
+                save_overlay = self.state.toolbar.start_stop.save_overlay.get()
+                self.save_images(
+                    raw_image=result.raw_im,
+                    result_image=result.rasterised if save_overlay else None,
+                    frame=result.frame_id,
+                )
+                self._last_record_t = self.time_elapsed
         else:
             self.state.diameters = None
             diams = self.state.diameters
@@ -1391,6 +1609,7 @@ class Model:
             # Record measurements
             # -------------------
             self.state.measure.append(
+                frame=result.frame_id,
                 t=self.time_elapsed,
                 od=diams.avg_outer_diam,
                 id=diams.avg_inner_diam,
@@ -1413,6 +1632,13 @@ class Model:
             if tracking and getattr(self, "output_file", None) is not None:
                 self.output_writer.writerow(self.state.measure.get_last_row())
                 self.output_file.flush()
+                # Periodically force everything to disk: makes the growing
+                # recording visible in Explorer (which won't refresh an open
+                # file's size on flush alone) and bounds data loss on a crash.
+                now = time.time()
+                if now - self._last_fsync_t >= 2.0:
+                    self._fsync_outputs()
+                    self._last_fsync_t = now
 
         # NOTE(cmo): Drop frames if the UI can't keep up
         if diams is not None and not self.state.graph.dirty.get():
@@ -1618,8 +1844,14 @@ class Model:
         self.output_stem1 = None
         self.output_stem2 = None
 
-    def save_images(self, raw_image: Optional[np.ndarray] = None, result_image: Optional[np.ndarray] = None, metadata: Optional[dict] = None):
-        """Save raw and/or result images to TIFF files, rotating both together when needed."""
+    def save_images(self, raw_image: Optional[np.ndarray] = None, result_image: Optional[np.ndarray] = None, metadata: Optional[dict] = None, frame: Optional[int] = None):
+        """Save raw and/or result images to TIFF files, rotating both together when needed.
+
+        `frame` is the id of the frame being saved (result.frame_id); it is
+        written into each page's metadata as "FrameNumber" and matches the
+        "Frame" column of the results CSV. Falls back to the running frame
+        counter (may lag under multi-threaded analysis) when not supplied.
+        """
         # Check if output files are set up
         if self.output_stem is None or self.output_dir is None:
             print(f"DEBUG save_images: Cannot save - output_stem={self.output_stem}, output_dir={self.output_dir}")
@@ -1647,7 +1879,7 @@ class Model:
         # Add standard metadata
         default_metadata = {
             'Timestamp': datetime.now().isoformat(),
-            'FrameNumber': self.frame_count,
+            'FrameNumber': int(frame) if frame is not None else self.frame_count,
             'TimeElapsed': self.time_elapsed,
         }
 
@@ -1659,13 +1891,187 @@ class Model:
 
         # Write raw image
         if raw_image is not None and self.tiff_writer1 is not None:
-            self.tiff_writer1.write(raw_image, description=metadata_json)
+            self.tiff_writer1.write(raw_image, description=metadata_json,
+                                    compression=TIFF_COMPRESSION)
             self.current_size1 += raw_size
+            # Flush so the growing stack is visible on disk and readable by
+            # other tools mid-recording. Without this, Windows keeps a stale
+            # file size (and a truncated tail) until the writer is closed when
+            # tracking stops - which looks like "nothing saved until I stop".
+            self._flush_writer(self.tiff_writer1)
 
         # Write result image
         if result_image is not None and self.tiff_writer2 is not None:
-            self.tiff_writer2.write(result_image, description=metadata_json)
+            self.tiff_writer2.write(result_image, description=metadata_json,
+                                    compression=TIFF_COMPRESSION)
             self.current_size2 += result_size
+            self._flush_writer(self.tiff_writer2)
+
+    @staticmethod
+    def _flush_writer(writer):
+        try:
+            writer.filehandle.flush()
+        except Exception:
+            pass
+
+    def _fsync_outputs(self):
+        """flush() + os.fsync() every open output file. flush() alone leaves
+        Windows reporting a stale size for a file held open for writing, so the
+        recording looks frozen until tracking stops; fsync commits the size and
+        the data. Called throttled (~every 2 s) from the tracking loop."""
+        for fh in (getattr(self, "output_file", None), getattr(self, "table_file", None),
+                   getattr(self, "lines_file", None), getattr(self, "roi_log_file", None)):
+            try:
+                if fh is not None and not fh.closed:
+                    fh.flush()
+                    os.fsync(fh.fileno())
+            except Exception:
+                pass
+        for w in (getattr(self, "tiff_writer1", None), getattr(self, "tiff_writer2", None)):
+            try:
+                if w is not None:
+                    w.filehandle.flush()
+                    os.fsync(w.filehandle.fileno())
+            except Exception:
+                pass
+
+    def save_snapshot(self, image: np.ndarray, subdir: Optional[str] = None):
+        """Write a single-frame TIFF for the Snapshot button. Independent of the
+        Record output files: writes into <experiment>/snapshots when an
+        experiment output has been set up, otherwise into
+        ~/Documents/Results/snapshots. The filename carries a timestamp and
+        frame number so repeated snapshots never overwrite each other."""
+        if self.output_dir:
+            base = Path(self.output_dir) / "snapshots"
+            stem = self.output_stem or "snapshot"
+        else:
+            base = Path(os.path.expanduser("~/Documents")) / "Results" / "snapshots"
+            stem = "snapshot"
+        if subdir:
+            base = base / subdir
+        base.mkdir(parents=True, exist_ok=True)
+
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        frame = int(getattr(self, "frame_count", 0))
+        path = base / f"{stem}_{ts}_f{frame:06d}.tiff"
+        dedup = 1
+        while path.exists():
+            path = base / f"{stem}_{ts}_f{frame:06d}_{dedup}.tiff"
+            dedup += 1
+
+        tf.imwrite(str(path), np.asarray(image))
+        print(f"Snapshot saved: {path}")
+        return str(path)
+
+    def roi_mode_and_count(self, diams):
+        """(mode string, number of regions) for the current draw state."""
+        rds = self.state.cam_show.raster_draw_state
+        if rds.multi_roi:
+            return "MultiROI", len(rds.multi_roi)
+        if rds.autocaliper:
+            return "AutoCaliper", len(rds.autocaliper)
+        n = int(diams.outer_diam_x.shape[0]) if diams is not None else 0
+        return "Normal", n
+
+    def roi_signature(self, diams):
+        """A hashable summary of the ROI layout - changes when a box/line is
+        added, removed, moved, or the mode/scan-line count changes."""
+        rds = self.state.cam_show.raster_draw_state
+        mode, n = self.roi_mode_and_count(diams)
+        if mode == "MultiROI":
+            coords = tuple((round(r.x1), round(r.y1), round(r.x2), round(r.y2))
+                           for r in rds.multi_roi.values())
+        elif mode == "AutoCaliper":
+            coords = tuple((round(c.x1), round(c.y1), round(c.x2), round(c.y2))
+                           for c in rds.autocaliper.values())
+        else:
+            coords = (n,)
+        return (mode, n, coords)
+
+    def write_roi_reference(self, raw_im, diams, rotate_tracking, frame=None):
+        """Write a numbered reference for the current ROI layout:
+          <stem>_ROIs.png / _ROIs.csv            - layout at recording start
+          <stem>_ROIs_f<frame>.png / .csv        - layout from that frame on
+        The Number matches the position in _lines.csv (OD_L1, OD_L2, ...) and
+        the results CSV's Outer/Inner Profiles lists. Returns the .png name."""
+        if not self.output_dir or not self.output_stem:
+            return None
+        base = Path(self.output_dir)
+        rds = self.state.cam_show.raster_draw_state
+        try:
+            cmap = self.state.toolbar.analysis.colormap.get()
+        except Exception:
+            cmap = "Gray"
+        overlay = rasterise_camera_state(
+            apply_display_colormap(raw_im, cmap), rds, diams,
+            filter_diams=self.state.toolbar.analysis.filter.get(),
+            rotate_tracking=rotate_tracking,
+        )
+        labelled = draw_roi_labels(overlay, rds, diams, rotate_tracking)
+
+        suffix = "" if frame is None else f"_f{int(frame):06d}"
+        img_name = f"{self.output_stem}_ROIs{suffix}.png"
+        Image.fromarray(labelled).save(str(base / img_name))
+
+        rows = []
+        for i, roi in enumerate(rds.multi_roi.values(), start=1):
+            rows.append((i, "Box", "MultiROI", roi.x1, roi.y1, roi.x2, roi.y2))
+        for i, cal in enumerate(rds.autocaliper.values(), start=1):
+            rows.append((i, "Line", "AutoCaliper", cal.x1, cal.y1, cal.x2, cal.y2))
+        if not rds.multi_roi and not rds.autocaliper and diams is not None:
+            for i in range(int(diams.outer_diam_x.shape[0])):
+                ox, oy = diams.outer_diam_x[i], diams.outer_diam_y[i]
+                rows.append((i + 1, "ScanLine", "Normal",
+                             int(ox[0]), int(oy[0]), int(ox[1]), int(oy[1])))
+        with open(base / f"{self.output_stem}_ROIs{suffix}.csv", "w", newline="") as f:
+            w = csv.writer(f)
+            w.writerow(("Number", "Type", "Mode", "X1", "Y1", "X2", "Y2"))
+            w.writerows(rows)
+        print(f"ROI reference written: {img_name}")
+        return img_name
+
+    def check_roi_change(self, frame, t, raw_im, diams, rotate_tracking):
+        """Called per recorded frame. If the ROI layout differs from the last
+        recorded one, write a fresh (frame-stamped after the first) reference
+        and append a row to _ROIs_log.csv. Returns True on a change."""
+        sig = self.roi_signature(diams)
+        if sig == self._roi_sig:
+            return False
+        first = self._roi_sig is None
+        self._roi_sig = sig
+        mode, n = self.roi_mode_and_count(diams)
+        ref = self.write_roi_reference(
+            raw_im, diams, rotate_tracking,
+            frame=None if first else frame,
+        )
+        if self.roi_log_writer is not None:
+            self.roi_log_writer.writerow(
+                [int(frame), round(float(t), 1), "start" if first else "changed",
+                 mode, n, ref or ""]
+            )
+            self.roi_log_file.flush()
+        return not first  # first frame isn't a "change"
+
+    def write_line_row(self, frame, t, diams, roi_changed):
+        """One wide row per recorded frame in _lines.csv: per-line OD/ID with a
+        fixed column count (NUM_LINES), blanks for lines not currently in use."""
+        if self.lines_writer is None:
+            return
+        mode, _ = self.roi_mode_and_count(diams)
+        od = list(np.atleast_1d(diams.outer_diam)) if diams is not None else []
+        idm = list(np.atleast_1d(diams.inner_diam)) if diams is not None else []
+
+        def col(vals, i):
+            if i < len(vals):
+                v = vals[i]
+                return "" if v is None or (isinstance(v, float) and np.isnan(v)) else round(float(v), 2)
+            return ""
+
+        row = [int(frame), round(float(t), 1), mode, 1 if roi_changed else 0]
+        row += [col(od, i) for i in range(NUM_LINES)]
+        row += [col(idm, i) for i in range(NUM_LINES)]
+        self.lines_writer.writerow(row)
+        self.lines_file.flush()
 
     # Keep old method for backwards compatibility (e.g., snapshots)
     def save_image(self, image: np.ndarray, subdir1: Optional[str] = None, subdir2: Optional[str] = None, metadata: Optional[dict] = None):
@@ -1682,7 +2088,7 @@ class Model:
                 if self.tiff_writer1 is None:
                     self.output_stem1 = f"{self.output_stem}_{subdir1}"
                     self.initialize_tiff_writer1()
-                self.tiff_writer1.write(image)
+                self.tiff_writer1.write(image, compression=TIFF_COMPRESSION)
                 self.current_size1 += image.nbytes
 
     def process_updates(self):
@@ -1871,8 +2277,10 @@ class Model:
                     slider_img = camera.get_specific_frame(self.state.cam_show.slider_position_manual)
                     slider_index = int(self.state.cam_show.slider_position_manual) - 1
 
-                    safe_var_set(self.state.toolbar.data_acq.outer_diam, np.round(self.state.measure.outer_diam[slider_index], 1))
-                    safe_var_set(self.state.toolbar.data_acq.inner_diam, np.round(self.state.measure.inner_diam[slider_index], 1))
+                    _n = len(self.state.measure.outer_diam)
+                    if _n and -_n <= slider_index < _n:
+                        safe_var_set(self.state.toolbar.data_acq.outer_diam, np.round(self.state.measure.outer_diam[slider_index], 1))
+                        safe_var_set(self.state.toolbar.data_acq.inner_diam, np.round(self.state.measure.inner_diam[slider_index], 1))
                     # If no multi ROIs have been drawn then an error is returned as cant set the value. There way be a better way to do this other than try.
                     try:
                         for i in range(NUM_LINES):
@@ -2054,6 +2462,13 @@ class Model:
             filter_diams=filter_diams,
             rotate_tracking=tb.analysis.rotate_tracking.get(),
         )
+        rds = self.state.cam_show.raster_draw_state
+        if tb.plotting.show_roi_numbers.get() and (rds.multi_roi or rds.autocaliper):
+            try:
+                rasterised = draw_roi_labels(rasterised, rds, self.state.diameters,
+                                             tb.analysis.rotate_tracking.get())
+            except Exception:
+                traceback.print_exc()
         self.state.cam_show.im_data = rasterised
         self.state.cam_show.dirty.set(True)
 
@@ -2314,7 +2729,7 @@ class AcquisitionSettingsPane(ToolbarPane):
         make_entry = make_entry_factory(self)
 
         # Set a fixed size
-        self.configure(width=220, height=150)  
+        self.configure(width=220, height=150)
         self.grid_propagate(False)  # Prevent shrinking/expanding if using grid
         self.pack_propagate(False)  # Prevent resizing if using pack
 
@@ -2932,6 +3347,15 @@ class PlottingPane(ToolbarPane):
             for i in range(NUM_LINES)
         ]
 
+        self.show_numbers_check = ctk.CTkCheckBox(
+            self, text="Number ROIs / lines on the image",
+            variable=sv.show_roi_numbers,
+            font=(default_font, default_font_size),
+            checkbox_width=18, checkbox_height=18, border_width=2,
+        )
+        self.show_numbers_check.grid(
+            row=NUM_LINES + 2, column=0, columnspan=4, pady=(8, 4), padx=padx, sticky="w"
+        )
 
     def update_button_states(self):
         for i, button in enumerate(self.show_buttons):
@@ -3429,8 +3853,15 @@ class StartStopPane(ToolbarPane):
         self.snapshot_button = ctk.CTkButton(self, image=self.snapshot_image, width=50, text="")#, compound='top')#text="Snapshot",
         self.snapshot_button.grid(row=1, column=2, padx=5, pady=8)#, sticky="nsew")
 
-        self.record_button = ctk.CTkSwitch(self, variable=sv.record, text="Record Camera", font=(default_font, default_font_size), switch_height=20, switch_width=40)
-        self.record_button.grid(row=2, column=0, columnspan=3, padx=5, pady=5, sticky="NS")
+        self.record_button = ctk.CTkSwitch(self, variable=sv.record, text="Record time-lapse", font=(default_font, default_font_size), switch_height=20, switch_width=40)
+        self.record_button.grid(row=2, column=0, columnspan=3, padx=5, pady=(5, 2), sticky="NS")
+
+        self.save_overlay_check = ctk.CTkCheckBox(
+            self, variable=sv.save_overlay, text="incl. tracked overlay",
+            font=(default_font, default_font_size - 2),
+            checkbox_width=16, checkbox_height=16, border_width=2,
+        )
+        self.save_overlay_check.grid(row=3, column=0, columnspan=3, padx=5, pady=(0, 5), sticky="NS")
 
         self.model_vars.app.acquiring.trace_add(
             "write", lambda *args: self.start_button_state_callback()
@@ -3448,7 +3879,8 @@ class StartStopPane(ToolbarPane):
             self.start_button: "Start/stop the camera display.",
             self.track_button: "Start/stop diameter tracking.",
             self.snapshot_button: "Take a snapshot.",
-            self.record_button: "Enable/disable video recording.",
+            self.record_button: "While tracking, save a time-lapse of the raw and tracked frames to TIFF, one pair every 'Rec intvl' seconds (0 = every frame).",
+            self.save_overlay_check: "Also save the tracked-overlay stack (_Result_*.tiff). Turn off to save only the raw stack + CSV and roughly halve the disk footprint - the overlay can be regenerated from those.",
         }
 
         for widget, text in tooltips.items():
@@ -3460,11 +3892,6 @@ class StartStopPane(ToolbarPane):
         resized_image = img.resize((width, height), Image.LANCZOS)
         tk_image = ctk.CTkImage(resized_image, size=(width, height))  # Ensure proper scaling
         return tk_image
-
-    def record_button_state_callback(self):
-        recording = self.model_vars.toolbar.start_stop.record.get()
-        self.model_vars.toolbar.start_stop.record.set(True)
-
 
     def start_button_state_callback(self):
         running = self.model_vars.app.acquiring.get()
@@ -4763,6 +5190,9 @@ class Controller:
         shutdown_callbacks.append(self.model.get_shutdown_callback())
         self.view = View(root, self.model.state, self.set_camera, shutdown_callbacks=shutdown_callbacks)
         self.camera_controller = CameraController(self.model, self.view)
+        # Last camera the user actually committed to (for reverting a cancelled
+        # Micro-Manager config chooser).
+        self._prev_camera = ELLIPSIS
 
         # Instantiate the PressureController
         if is_pydaqmx_available:
@@ -4810,11 +5240,9 @@ class Controller:
         #output_path = self.get_output_filename()
         #self.model.setup_output_files(output_path=output_path)
 
-        if self.model.configure.registration.register_flag == 0:
-            # Prompt user to register
-            # On successful registration:
-            splash = VasoTrackerSplashScreen(root, self.update_settings)
-            splash.splash_win.focus_force()
+        # The registration prompt is shown by initialize_controller *after* the
+        # main window is revealed - showing it here (mid-build, behind the
+        # loading splash) is what made startup look like a small stray window.
 
         self.model.process_updates()
 
@@ -5030,6 +5458,13 @@ class Controller:
         if cam_name is None:
             cam_name = self.model.state.toolbar.acq.camera.get()
 
+        # The Micro-Manager config camera opens a chooser first: pick which
+        # .cfg to load and test it live before committing. Cancelling there
+        # restores the previous selection, so bail out of the normal path.
+        if cam_name != ELLIPSIS and cam_name.lower() == "mmconfig":
+            self.open_mm_config_dialog()
+            return
+
         print("Camera name:", cam_name)
         self.model.set_camera(cam_name)
 
@@ -5049,6 +5484,303 @@ class Controller:
                 bits = 8
             if bits > 8:
                 self.show_scaling_popup(cam)
+        if cam is not None and cam_name != ELLIPSIS:
+            self._prev_camera = cam_name
+
+    # ------------------------------------------------------------------
+    # Micro-Manager configuration chooser
+    # ------------------------------------------------------------------
+
+    def _mm_config_search_dirs(self):
+        """Directories scanned for *.cfg - only the active Micro-Manager
+        install, where MM's own MMConfig.cfg lives and the Hardware Config
+        Wizard saves by default. (The VasoTracker folder is deliberately not
+        scanned: its bundled Basler.cfg / OpenCV.cfg / MMConfig.cfg are
+        placeholders for the built-in camera classes, not user configs.)"""
+        dirs = []
+        try:
+            from pymmcore_plus import find_micromanager
+            mm = find_micromanager()
+            if mm and os.path.isdir(mm):
+                dirs.append(mm)
+        except Exception:
+            traceback.print_exc()
+        return dirs
+
+    @staticmethod
+    def _is_mm_system_config(path):
+        """A Micro-Manager system config, not e.g. ImageJ.cfg or a logger .cfg
+        that happens to share the extension. MM Configurator output always has
+        Core/Device lines."""
+        try:
+            with open(path, "r", errors="ignore") as f:
+                head = f.read(4096)
+        except Exception:
+            return False
+        return ("Property,Core," in head) or ("\nDevice," in head) or head.startswith("Device,")
+
+    def _persist_settings(self):
+        try:
+            self.model.to_config().save(override_path=self.model.user_config_path)
+        except Exception:
+            traceback.print_exc()
+
+    def open_mm_config_dialog(self):
+        """Pick the Micro-Manager system configuration for the 'MMConfig'
+        camera, with a live test preview. Use commits it (and persists the
+        choice); Cancel restores the previously selected camera."""
+        acq = self.model.state.toolbar.acq
+        prev_cam = getattr(self, "_prev_camera", ELLIPSIS)
+
+        popup = tk.Toplevel(root)
+        popup.title("Micro-Manager camera configuration")
+        try:
+            popup.iconbitmap(os.path.join(images_folder, "vt_icon.ICO"))
+        except Exception:
+            pass
+        popup.resizable(False, False)
+        popup.transient(root)
+        popup.grab_set()
+
+        frm = tk.Frame(popup)
+        frm.pack(padx=12, pady=10)
+
+        try:
+            from pymmcore_plus import find_micromanager
+            mm_path = find_micromanager() or "(not found)"
+        except Exception:
+            mm_path = "(not found)"
+        tk.Label(
+            frm, text=f"Micro-Manager: {mm_path}", justify=tk.LEFT,
+            font=(default_font, 9), fg="gray30",
+        ).grid(row=0, column=0, columnspan=3, sticky=tk.W, pady=(0, 6))
+
+        tk.Label(
+            frm, text="Configuration file:", font=(default_font, default_font_size)
+        ).grid(row=1, column=0, columnspan=3, sticky=tk.W)
+
+        listbox = tk.Listbox(
+            frm, height=6, width=58, exportselection=False, font=(default_font, 9)
+        )
+        listbox.grid(row=2, column=0, columnspan=2, sticky=tk.EW, pady=(2, 4))
+        sb = ttk.Scrollbar(frm, orient=tk.VERTICAL, command=listbox.yview)
+        sb.grid(row=2, column=2, sticky="nsw", pady=(2, 4))
+        listbox.configure(yscrollcommand=sb.set)
+
+        entries = []  # (label, path);  path "" means auto-resolve
+
+        def norm(p):
+            return os.path.normcase(os.path.abspath(p)) if p else ""
+
+        def rebuild_list(select_path=None):
+            listbox.delete(0, tk.END)
+            entries.clear()
+            entries.append(("(auto — use the Micro-Manager install's MMConfig.cfg)", ""))
+            seen = set()
+            for d in self._mm_config_search_dirs():
+                for p in sorted(glob.glob(os.path.join(d, "*.cfg"))):
+                    if norm(p) in seen or not self._is_mm_system_config(p):
+                        continue
+                    seen.add(norm(p))
+                    entries.append((f"{os.path.basename(p)}      ({d})", p))
+            cur = acq.mm_config_file.get()
+            if cur and norm(cur) not in seen:
+                entries.append((f"{os.path.basename(cur)}      ({os.path.dirname(cur)})", cur))
+            for label, _ in entries:
+                listbox.insert(tk.END, label)
+            target = norm(select_path if select_path is not None else acq.mm_config_file.get())
+            idx = 0
+            for i, (_, p) in enumerate(entries):
+                if p and target and norm(p) == target:
+                    idx = i
+                    break
+            listbox.selection_clear(0, tk.END)
+            listbox.selection_set(idx)
+            listbox.see(idx)
+
+        def selected_path():
+            sel = listbox.curselection()
+            return entries[sel[0]][1] if sel else ""
+
+        def browse():
+            p = filedialog.askopenfilename(
+                parent=popup, title="Select Micro-Manager configuration",
+                filetypes=(("Micro-Manager config", "*.cfg"), ("All files", "*.*")),
+                initialdir=(mm_path if os.path.isdir(mm_path) else os.getcwd()),
+            )
+            if p:
+                acq.mm_config_file.set(p)
+                rebuild_list(select_path=p)
+
+        ttk.Button(frm, text="Browse…", command=browse).grid(
+            row=3, column=0, sticky=tk.W, pady=(0, 6)
+        )
+
+        status = tk.StringVar(value="Select a configuration and press Test.")
+        tk.Label(
+            frm, textvariable=status, justify=tk.LEFT, width=58, anchor=tk.W,
+            font=(default_font, 9),
+        ).grid(row=4, column=0, columnspan=3, sticky=tk.W)
+
+        preview = tk.Label(frm, text="No preview", width=46, height=10,
+                           bg="gray20", fg="gray70")
+        preview.grid(row=5, column=0, columnspan=3, pady=6)
+
+        ui = {"testing": False, "loaded": False}
+
+        def stop_stream():
+            ui["testing"] = False
+            cam = self.model.state.camera
+            if cam is not None:
+                try:
+                    cam.stop_acquisition()
+                except Exception:
+                    pass
+
+        def teardown():
+            stop_stream()
+            cam = self.model.state.camera
+            if cam is not None:
+                try:
+                    cam.reset()
+                except Exception:
+                    pass
+            try:
+                self.model.mmc.unloadAllDevices()
+            except Exception:
+                pass
+            self.model.state.camera = None
+            ui["loaded"] = False
+
+        def load_selected():
+            acq.mm_config_file.set(selected_path())
+            teardown()
+            status.set("Loading configuration…")
+            popup.update_idletasks()
+            try:
+                self.model.set_camera("MMConfig")
+            except Exception as e:
+                status.set(f"Load failed: {e}")
+                return None
+            cam = self.model.state.camera
+            if cam is None:
+                status.set("Configuration did not load - see console.")
+                return None
+            try:
+                has_cam = len(cam.mmc.getLoadedDevicesOfType(2)) > 0
+            except Exception:
+                has_cam = False
+            if not has_cam:
+                status.set("No camera in that configuration - see console.")
+                teardown()
+                return None
+            ui["loaded"] = True
+            return cam
+
+        def do_test():
+            cam = load_selected()
+            if cam is None:
+                return
+            try:
+                names = ", ".join(cam.mmc.getLoadedDevicesOfType(2))
+                w, h = cam.get_camera_dims()
+                status.set(f"Streaming {names}  ({w}x{h})")
+            except Exception:
+                status.set("Configuration loaded. Streaming…")
+            try:
+                cam.start_acquisition()
+            except Exception as e:
+                status.set(f"Loaded, but acquisition failed: {e}")
+                return
+            ui["testing"] = True
+            pump()
+
+        def pump():
+            if not ui["testing"] or not popup.winfo_exists():
+                return
+            cam = self.model.state.camera
+            raw = None
+            if cam is not None:
+                try:
+                    raw = cam.get_raw_frame()
+                except Exception:
+                    raw = None
+            if raw is not None and raw.size > 1:
+                disp = raw
+                if disp.dtype != np.uint8:
+                    lo = float(np.percentile(disp, 0.5))
+                    hi = float(np.percentile(disp, 99.7))
+                    if hi <= lo:
+                        lo, hi = float(disp.min()), float(disp.max() + 1)
+                    disp = np.clip(
+                        (disp.astype(np.float32) - lo) / max(hi - lo, 1.0), 0.0, 1.0
+                    ) * 255.0
+                    disp = disp.astype(np.uint8)
+                h, w = disp.shape[:2]
+                s = min(1.0, 360.0 / w)
+                if s < 1.0:
+                    disp = cv2.resize(disp, (int(w * s), int(h * s)))
+                img = ImageTk.PhotoImage(Image.fromarray(disp))
+                preview.configure(image=img, text="",
+                                  width=disp.shape[1], height=disp.shape[0])
+                preview.image = img
+            popup.after(100, pump)
+
+        def use_it():
+            path = selected_path()
+            stop_stream()
+            if not ui["loaded"] or norm(path) != norm(acq.mm_config_file.get()):
+                if load_selected() is None:
+                    return
+            cam = self.model.state.camera
+            if cam is None:
+                tmb.showerror("Configuration error",
+                              "The configuration did not load. See console.",
+                              parent=popup)
+                return
+            acq.camera.set("mmconfig")
+            self._prev_camera = "mmconfig"
+            self._persist_settings()
+            try:
+                w, h = cam.get_camera_dims()
+                idm = self.model.state.toolbar.image_dim
+                idm.cam_width.set(w); idm.cam_height.set(h)
+                idm.fov_width.set(w); idm.fov_height.set(h)
+            except Exception:
+                traceback.print_exc()
+            popup.grab_release()
+            popup.destroy()
+            if (
+                type(cam).get_image is CameraBase.get_image
+                and getattr(cam, "_scale_lo", None) is None
+            ):
+                try:
+                    if int(cam.mmc.getImageBitDepth()) > 8:
+                        self.show_scaling_popup(cam)
+                except Exception:
+                    pass
+
+        def cancel():
+            stop_stream()
+            if ui["loaded"]:
+                teardown()
+            acq.camera.set(prev_cam)
+            popup.grab_release()
+            popup.destroy()
+            if prev_cam not in (ELLIPSIS, "mmconfig"):
+                try:
+                    self.model.set_camera(prev_cam)
+                except Exception:
+                    traceback.print_exc()
+
+        btns = tk.Frame(frm)
+        btns.grid(row=6, column=0, columnspan=3, pady=(6, 0), sticky=tk.EW)
+        ttk.Button(btns, text="Test", command=do_test).pack(side=tk.LEFT)
+        ttk.Button(btns, text="Use this config", command=use_it).pack(side=tk.RIGHT)
+        ttk.Button(btns, text="Cancel", command=cancel).pack(side=tk.RIGHT, padx=6)
+        popup.protocol("WM_DELETE_WINDOW", cancel)
+
+        rebuild_list()
 
     def set_camera_fov(self):
         tb = self.model.state.toolbar
@@ -5259,8 +5991,14 @@ class Controller:
 
     def take_snapshot(self):
         im_data = self.model.state.cam_show.im_data
-        if im_data is not None:
+        if im_data is None:
+            tmb.showinfo("Snapshot", "No image to snapshot yet - start the camera first.")
+            return
+        try:
             self.model.save_snapshot(im_data, subdir=None)
+        except Exception as e:
+            traceback.print_exc()
+            tmb.showerror("Snapshot failed", str(e))
 
 
 
@@ -5298,6 +6036,9 @@ class Controller:
         self.model.prev_update = 0.0
         self.model.time_elapsed = 0.0
         self.model.frame_count = 0
+        self.model._last_record_t = None
+        self.model._roi_ref_written = False
+        self.model._roi_sig = None
         self.model.state.cam_show.slider_position_manual = 0
         self.model.state.camera.reinitialize()
         self.model.state.frames_elapsed = 0
@@ -5386,15 +6127,14 @@ class Controller:
             self.view.shutdown_app(force=True)
     
     def update_settings(self, flag_name, value):
-        config = self.model.to_config()
-        # Use setattr to update the flag
+        # Registration state (register_flag / neveragain_flag), set by the
+        # "support us" splash. Persist to the per-user settings file - never
+        # the bundled copy.
         setattr(self.model.configure.registration, flag_name, value)
-        #self.model.configure.registration.set_values(self.state)
-        #self.model.configure.save(override_path=self.model.config_path)
-
-        """Get the path to a resource, whether it's bundled with PyInstaller or not."""
-        base_path = getattr(sys, '_MEIPASS', os.path.abspath("."))
-        self.model.configure.save(os.path.join(base_path, self.model.config_path))
+        try:
+            self.model.configure.save(override_path=self.model.user_config_path)
+        except Exception:
+            traceback.print_exc()
 
     
     def menu_save_settings(self):
@@ -6202,6 +6942,7 @@ def show_splash():
 
     rootsplash = tk.Toplevel()
     rootsplash.overrideredirect(True)  # Remove title bar
+    rootsplash.attributes("-topmost", True)  # keep it over the building main window
 
     width, height = rootsplash.winfo_screenwidth(), rootsplash.winfo_screenheight()
 
@@ -6289,9 +7030,20 @@ def initialize_controller():
         if (total >= 1.5 and quiet_for >= 0.5) or total >= 5.0:
             _reveal["done"] = True
             rootsplash.destroy()  # Remove the loading splash screen
-            root.deiconify()
+            # Map straight to the maximised state - state('zoomed') maps the
+            # window itself, so there is no small-then-resized flash from
+            # deiconify()ing first. deiconify() after is a harmless no-op.
             root.state('zoomed')
+            root.deiconify()
             root.after(800, lambda: _restore_switch_off_colour(root))
+            # Registration prompt now, on top of the finished window.
+            if app.model.configure.registration.register_flag == 0:
+                def _show_registration():
+                    reg = VasoTrackerSplashScreen(root, app.update_settings)
+                    reg.splash_win.lift()
+                    reg.splash_win.attributes("-topmost", True)
+                    reg.splash_win.focus_force()
+                root.after(400, _show_registration)
         else:
             root.after(100, _try_reveal)
 
@@ -6313,11 +7065,10 @@ if __name__ == "__main__":
     mm_path = find_micromanager()
     print(mm_path)
 
-    # The newest Micro-Manager nightly known to match the device interface
-    # version of the pymmcore we ship (pins live in version.py; see
-    # MICROMANAGER.md). The nightlies move to new interface versions over
-    # time, so "latest" (and even pymmcore-plus's "latest-compatible") can
-    # silently install an incompatible Micro-Manager.
+    # The Micro-Manager nightly whose device interface matches the pymmcore we
+    # ship (pins live in version.py; see MICROMANAGER.md). This is the build we
+    # tell users to install - VasoTracker does not install Micro-Manager
+    # itself; the user installs a matching one and it is found in Program Files.
     KNOWN_COMPATIBLE_MM_NIGHTLY = version.MM_COMPATIBLE_NIGHTLY
 
     # Consistency check: warn loudly if the pymmcore actually present speaks
@@ -6337,35 +7088,44 @@ if __name__ == "__main__":
         traceback.print_exc()
 
     if mm_path is None:
-        # Try to auto-install Micro-Manager
+        # No auto-install. VasoTracker's bundled pymmcore speaks exactly one
+        # Micro-Manager device interface version; the user installs a matching
+        # Micro-Manager themselves (normal installer, default location) and it
+        # is picked up from Program Files automatically. Tell them precisely
+        # which build to get, and name any incompatible install we did find so
+        # "but I have Micro-Manager!" has an answer.
+        need_div = version.MM_DEVICE_INTERFACE
         try:
-            tmb.showinfo("Installing Micro-Manager",
-                        "Micro-Manager not found. Installing automatically...\n\n"
-                        "This may take a few minutes on first run.")
-            from pymmcore_plus.install import install
-            try:
-                install(release=KNOWN_COMPATIBLE_MM_NIGHTLY)
-            except Exception:
-                # Pinned build unavailable (e.g. no longer hosted):
-                # fall back to pymmcore-plus's own resolution.
-                traceback.print_exc()
-                install()
-            mm_path = find_micromanager()
-        except Exception as e:
-            print(f"Auto-install failed: {e}")
-            mm_path = None
+            from pymmcore_plus._discovery import discover_mm
+            incompatible = [d for d in discover_mm() if not d.div_compatible]
+        except Exception:
+            traceback.print_exc()
+            incompatible = []
 
-    if mm_path is None:
-        # Auto-install failed, show manual instructions
-        tmb.showinfo(
-            "Warning",
-            "Micro-Manager could not be installed automatically.\n\n"
-            "Please download and install the nightly build dated "
-            f"{KNOWN_COMPATIBLE_MM_NIGHTLY} (newer builds use an incompatible "
-            "device interface), then relaunch VasoTracker.",
-        )
+        msg = [
+            f"VasoTracker needs Micro-Manager nightly build "
+            f"{KNOWN_COMPATIBLE_MM_NIGHTLY} (device interface {need_div}).",
+            "",
+        ]
+        if incompatible:
+            msg.append("Found, but not compatible with this VasoTracker:")
+            for d in incompatible:
+                msg.append(f"    {d.path}  -  device interface {d.device_interface}")
+            msg += [
+                "",
+                f"Install the {KNOWN_COMPATIBLE_MM_NIGHTLY} nightly (it can sit "
+                "next to the others) and relaunch VasoTracker.",
+            ]
+        else:
+            msg.append(
+                "Micro-Manager is not installed. Download the "
+                f"{KNOWN_COMPATIBLE_MM_NIGHTLY} nightly, run the installer "
+                "(default location is fine), and relaunch VasoTracker."
+            )
+        msg += ["", "Opening the Micro-Manager nightly download page..."]
+
+        tmb.showinfo("Micro-Manager required", "\n".join(msg))
         webbrowser.open_new("https://download.micro-manager.org/nightly/2.0/Windows/")
-        root.destroy()
         sys.exit()
 
     mmc = CMMCorePlus(adapter_paths=[mm_path, SYS32_PATH])
