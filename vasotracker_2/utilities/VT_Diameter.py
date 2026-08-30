@@ -290,19 +290,17 @@ def calculate_diameter(
 
                 start_x, start_y, end_x, end_y = start_x_new, start_y_new, end_x_new, end_y_new
 
-        # Ensure scanlines are spaced evenly along the y-axis in the rotated image
+        # Exactly `num_lines` scanlines, evenly spaced strictly inside the ROI
+        # at fractions 1/(N+1) .. N/(N+1) of its height. (The old int()-floored
+        # start/step/end + range() gave num_lines +/- 1 for many ROI heights.)
         total_height = end_y - start_y
-        space_between_lines = total_height / (num_lines + 1)
+        edge = max(1, int(lines_to_avg // 2))
+        line_ys = []
+        for k in range(1, num_lines + 1):
+            y = int(round(start_y + total_height * k / (num_lines + 1)))
+            y = min(max(y, start_y + edge), end_y - edge - 1)
+            line_ys.append(y)
 
-        start = int(start_y + space_between_lines)  # Always space along y-axis
-        diff = int(total_height / (num_lines + 1))
-        end = int(end_y - space_between_lines)
-
-        # Ensure correct number of lines
-        if total_height % (num_lines + 1) == 0:
-            end += 1
-
-        line_ys = list(range(start, end, diff))
         # In 90-degree mode np.rot90 (counter-clockwise) maps the vessel's
         # right end to the top of the rotated image, so ascending rotated-y
         # runs right-to-left across the displayed vessel. Reverse so line 1
