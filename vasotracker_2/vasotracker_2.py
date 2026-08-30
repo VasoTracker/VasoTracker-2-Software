@@ -1790,12 +1790,17 @@ class Model:
 
 
 
+    # NOTE: bigtiff=False. Classic ImageJ's TIFF reader (no Bio-Formats) cannot
+    # parse BigTIFF - it misreads the IFD chain and reports "unsupported format".
+    # Recordings roll over to a new file at self.max_file_size (< 4 GB), so
+    # standard TIFF is always sufficient and stays universally readable. The
+    # Adobe-Deflate ("zlib") compression we use is understood by ImageJ.
     def initialize_tiff_writer1(self):
         # First file starts at 001
         self.file_counter1 = 1
         self.output_path1 = Path(self.output_dir) / f"{self.output_stem1}_{self.file_counter1:03d}.tiff"
         print(f"Starting file: {self.output_path1}")
-        self.tiff_writer1 = tf.TiffWriter(self.output_path1, mode='w', bigtiff=True)
+        self.tiff_writer1 = tf.TiffWriter(self.output_path1, mode='w', bigtiff=False)
         self.current_size1 = 0
 
     def initialize_tiff_writer2(self):
@@ -1803,7 +1808,7 @@ class Model:
         self.file_counter2 = 1
         self.output_path2 = Path(self.output_dir) / f"{self.output_stem2}_{self.file_counter2:03d}.tiff"
         print(f"Starting file: {self.output_path2}")
-        self.tiff_writer2 = tf.TiffWriter(self.output_path2, mode='w', bigtiff=True)
+        self.tiff_writer2 = tf.TiffWriter(self.output_path2, mode='w', bigtiff=False)
         self.current_size2 = 0
 
     def check_and_rotate_writers(self, image_size1: int, image_size2: int):
@@ -1831,13 +1836,13 @@ class Model:
             if self.output_stem1 is not None:
                 self.output_path1 = Path(self.output_dir) / f"{self.output_stem1}_{self.file_counter1:03d}.tiff"
                 print(f"Starting new file: {self.output_path1}")
-                self.tiff_writer1 = tf.TiffWriter(self.output_path1, mode='w', bigtiff=True)
+                self.tiff_writer1 = tf.TiffWriter(self.output_path1, mode='w', bigtiff=False)
                 self.current_size1 = 0
 
             if self.output_stem2 is not None:
                 self.output_path2 = Path(self.output_dir) / f"{self.output_stem2}_{self.file_counter2:03d}.tiff"
                 print(f"Starting new file: {self.output_path2}")
-                self.tiff_writer2 = tf.TiffWriter(self.output_path2, mode='w', bigtiff=True)
+                self.tiff_writer2 = tf.TiffWriter(self.output_path2, mode='w', bigtiff=False)
                 self.current_size2 = 0
 
     def close_tiff_writers(self):
