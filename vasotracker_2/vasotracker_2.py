@@ -4431,7 +4431,18 @@ class GraphFrame(ttk.Frame):
         self._bg_stale = True
         self.figure.canvas.draw()
         self.toolbar.update()
+        self._reblit_after_limits()
 
+    def _reblit_after_limits(self):
+        """canvas.draw() renders everything except the animated trace artists,
+        so after an axis-limit change the plotted lines vanish until the next
+        frame arrives. Force the blit path to re-render them onto the fresh
+        background now."""
+        try:
+            self._bg_stale = True
+            self.state_vars.graph.dirty.set(True)
+        except Exception:
+            pass
 
     def update_lims_callback(self):
         settings = self.state_vars.toolbar.graph
@@ -4490,6 +4501,7 @@ class GraphFrame(ttk.Frame):
             # Mark background as stale and redraw
             self._bg_stale = True
             self.figure.canvas.draw()
+            self._reblit_after_limits()
 
             # Reset the limits dirty flag
             settings.limits_dirty.set(False)
