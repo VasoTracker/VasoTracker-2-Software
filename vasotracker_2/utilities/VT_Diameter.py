@@ -27,6 +27,7 @@ from .VTutils import (
     is_outlier,
     local_std_profile,
     process_ddts,
+    process_walls_fmd,
     texture_changepoints,
 )
 from scipy.signal import medfilt
@@ -248,6 +249,7 @@ def calculate_diameter(
     rotate_tracking: bool,
     ultrasound_tracking: bool,
     texture_tracking: bool = False,
+    fmd_tracking: bool = False,
     edge_prior=None,
 ) -> Optional[ImageDiameters]:
      # Rotate the image by 90 degrees if rotate_tracking is True
@@ -294,6 +296,11 @@ def calculate_diameter(
         # at fractions 1/(N+1) .. N/(N+1) of its height. (The old int()-floored
         # start/step/end + range() gave num_lines +/- 1 for many ROI heights.)
         total_height = end_y - start_y
+        if fmd_tracking:
+            # B-mode speckle swamps a thin scanline; average each profile over
+            # a wide band so the scanlines tile the whole ROI with overlap.
+            lines_to_avg = max(int(lines_to_avg),
+                               int(1.5 * total_height / max(num_lines, 1)))
         edge = max(1, int(lines_to_avg // 2))
         line_ys = []
         for k in range(1, num_lines + 1):
@@ -379,7 +386,23 @@ def calculate_diameter(
     else:
         return None
 
-    if texture_tracking:
+    if fmd_tracking:
+        # Vascular-ultrasound / flow-mediated-dilation mode: explicit B-mode
+        # wall model (bright near/far wall reflections either side of the
+        # anechoic lumen). Inner diameter = the lumen-intima interfaces (the
+        # FMD measurement); outer = the adventitial sides. See
+        # process_walls_fmd.
+        diams = process_walls_fmd(
+            data,
+            start_x,
+            scale,
+            thresh_factor,
+            compute_id,
+            smooth_factor=smooth_factor,
+            consensus=(not have_autocalipers and single_roi),
+            edge_prior=edge_prior,
+        )
+    elif texture_tracking:
         # Fibrous-tissue mode: walls detected as changepoints of the local
         # texture (variance) rather than intensity gradients. See
         # process_texture. Smoothing/gradient settings do not apply.

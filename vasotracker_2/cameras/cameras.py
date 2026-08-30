@@ -12,6 +12,7 @@ import tifffile as tf
 import tkinter as tk
 from tkinter import filedialog
 import sys
+import threading
 
 
 # The following is so that the required resources are included in the PyInstaller build.
@@ -417,12 +418,99 @@ class ProxyCamera(CameraBase, camera_name="SampleData"):
 '''
 
 
+class _TiffFrameSource:
+    """Frame access for a multi-page TIFF (one page per frame)."""
+
+    def __init__(self, path):
+        self.path = path
+        try:
+            with tf.TiffFile(path) as t:
+                self.n_frames = len(t.pages)
+        except Exception:
+            self.n_frames = 0
+
+    def frame(self, idx):
+        """Frame ``idx`` as a 2-D grayscale array at native bit depth, or None."""
+        try:
+            with tf.TiffFile(self.path) as t:
+                if not 0 <= idx < len(t.pages):
+                    return None
+                image = t.pages[idx].asarray()
+        except Exception:
+            return None
+        if image.ndim == 3:
+            code = cv2.COLOR_RGBA2GRAY if image.shape[-1] == 4 else cv2.COLOR_RGB2GRAY
+            image = cv2.cvtColor(image, code)
+        return image
+
+    def close(self):
+        pass
+
+
+class _VideoFrameSource:
+    """Frame access for a video file (AVI/MP4/MOV/...) via OpenCV.
+
+    One shared VideoCapture guarded by a lock, so reads from the tracking
+    thread and the preview / contrast calls on the UI thread are serialised.
+    Reads are sequential where possible (always frame-accurate); a short
+    forward gap is closed by reading through it, and only a backward jump or
+    a long forward jump issues a library seek.
+    """
+
+    # Close a forward gap of up to this many frames by decoding through it
+    # rather than seeking - keeps scrubbing frame-accurate on long-GOP codecs.
+    _MAX_SEQUENTIAL_SKIP = 48
+
+    def __init__(self, path):
+        self.path = path
+        self._lock = threading.Lock()
+        self._cap = cv2.VideoCapture(path)
+        opened = self._cap is not None and self._cap.isOpened()
+        n = int(self._cap.get(cv2.CAP_PROP_FRAME_COUNT)) if opened else 0
+        self.n_frames = max(n, 0)
+        self._next = 0  # frame index the capture will return next
+
+    def frame(self, idx):
+        with self._lock:
+            if self._cap is None or not self._cap.isOpened():
+                return None
+            if idx < 0 or (self.n_frames and idx >= self.n_frames):
+                return None
+            if idx < self._next or idx > self._next + self._MAX_SEQUENTIAL_SKIP:
+                self._cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
+                self._next = idx
+            frame = None
+            while self._next <= idx:
+                ok, frame = self._cap.read()
+                if not ok or frame is None:
+                    self._next = -1
+                    return None
+                self._next += 1
+        if frame is None:
+            return None
+        if frame.ndim == 3:
+            code = cv2.COLOR_BGRA2GRAY if frame.shape[-1] == 4 else cv2.COLOR_BGR2GRAY
+            frame = cv2.cvtColor(frame, code)
+        return frame
+
+    def close(self):
+        with self._lock:
+            if self._cap is not None:
+                self._cap.release()
+                self._cap = None
+
+
+# Extensions routed to the video reader; everything else is treated as a TIFF.
+_VIDEO_EXTS = (".avi", ".mp4", ".mov", ".mkv", ".m4v", ".wmv", ".mpg", ".mpeg")
+
+
 class SavedDataCamera(CameraBase, camera_name="Image from file"):
     def __init__(self, mmc: CMMCorePlus, state, config):
         super().__init__(mmc, state, config)
 
         self.frame_count = 0
         self.path_to_tiff = self.get_tiff_file_path()
+        self._src = self._open_source(self.path_to_tiff)
         self.max_frame_count = self.get_num_frames()
         self.config.proxy_camera.max_frame = self.max_frame_count
         self.camera_stopped = False
@@ -430,27 +518,48 @@ class SavedDataCamera(CameraBase, camera_name="Image from file"):
         self.last_frame_idx = None
         self._compute_intensity_scaling()
 
+        if self.path_to_tiff and self.max_frame_count == 0:
+            kind = ("video" if isinstance(self._src, _VideoFrameSource)
+                    else "multi-frame TIFF")
+            tmb.showerror(
+                "Could not open file",
+                f"'{os.path.basename(self.path_to_tiff)}' could not be read as a "
+                f"{kind} (no frames found).\n\nFor video, make sure it is a "
+                "format OpenCV can decode (most AVI/MP4/MOV files are)."
+            )
+
+    @staticmethod
+    def _open_source(path):
+        """Pick a frame reader from the file extension (TIFF pages vs video)."""
+        ext = os.path.splitext(path)[1].lower() if path else ""
+        if ext in _VIDEO_EXTS:
+            return _VideoFrameSource(path)
+        return _TiffFrameSource(path)
+
     def reinitialize(self):
         self.frame_count = 0
         self.camera_stopped = False
         self.last_frame = None
 
 
-    def _gray_page(self, tif, idx):
-        """Read one page as grayscale, preserving bit depth."""
-        image = tif.pages[idx].asarray()
-        if image.ndim == 3:
-            code = cv2.COLOR_RGBA2GRAY if image.shape[-1] == 4 else cv2.COLOR_RGB2GRAY
-            image = cv2.cvtColor(image, code)
-        return image
+    def _gray_frame(self, idx):
+        """One frame as grayscale at native bit depth, or None if unreadable."""
+        src = getattr(self, "_src", None)
+        if src is None:
+            return None
+        return src.frame(int(idx))
 
     def _sample_gray_pages(self):
         """Grayscale frames sampled from the start, middle and end of the file."""
-        with tf.TiffFile(self.path_to_tiff) as tif:
-            n = len(tif.pages)
-            if n == 0:
-                return None
-            return [self._gray_page(tif, idx) for idx in sorted({0, n // 2, n - 1})]
+        n = self.get_num_frames()
+        if n == 0:
+            return None
+        samples = []
+        for idx in sorted({0, n // 2, n - 1}):
+            f = self._gray_frame(idx)
+            if f is not None:
+                samples.append(f)
+        return samples or None
 
     def _compute_intensity_scaling(self):
         """Work out the intensity window mapped to 0-255, once per file.
@@ -498,14 +607,11 @@ class SavedDataCamera(CameraBase, camera_name="Image from file"):
             frame = int(self.state.cam_show.slider_position_manual)
         except Exception:
             frame = 0
-        try:
-            with tf.TiffFile(self.path_to_tiff) as tif:
-                if len(tif.pages) == 0:
-                    return None
-                frame = min(max(frame, 0), len(tif.pages) - 1)
-                return self._gray_page(tif, frame)
-        except (FileNotFoundError, tf.TiffFileError):
+        n = self.get_num_frames()
+        if n == 0:
             return None
+        frame = min(max(frame, 0), n - 1)
+        return self._gray_frame(frame)
 
     def auto_contrast(self):
         """Percentile-stretch the intensity window (any bit depth)."""
@@ -525,9 +631,12 @@ class SavedDataCamera(CameraBase, camera_name="Image from file"):
         self._scale_lo = lo
         self._scale_hi = hi
 
-    def _read_page(self, tif, idx):
-        """Read one page as 8-bit grayscale through the intensity window."""
-        image = self._gray_page(tif, idx)
+    def _read_page(self, idx):
+        """Read one frame as 8-bit grayscale through the intensity window,
+        or None if the frame cannot be read."""
+        image = self._gray_frame(idx)
+        if image is None:
+            return None
         lo = getattr(self, "_scale_lo", None)
         hi = getattr(self, "_scale_hi", None)
 
@@ -542,10 +651,11 @@ class SavedDataCamera(CameraBase, camera_name="Image from file"):
 
         return image.astype(np.uint8)
 
-    def _process_frame(self, tif, idx):
+    def _process_frame(self, idx):
         """Read a frame with the user's file image processing applied:
         temporal averaging over the preceding frames and gaussian smoothing.
-        Both default to off (1 frame / sigma 0)."""
+        Both default to off (1 frame / sigma 0). Returns None if the frame
+        cannot be read."""
         try:
             analysis = self.state.toolbar.analysis
             n_avg = max(1, int(analysis.temporal_frames.get()))
@@ -555,66 +665,68 @@ class SavedDataCamera(CameraBase, camera_name="Image from file"):
 
         if n_avg > 1:
             first = max(0, idx - n_avg + 1)
-            frames = [self._read_page(tif, k) for k in range(first, idx + 1)]
+            frames = [self._read_page(k) for k in range(first, idx + 1)]
+            frames = [f for f in frames if f is not None]
+            if not frames:
+                return None
             image = np.mean(frames, axis=0).astype(np.uint8)
         else:
-            image = self._read_page(tif, idx)
+            image = self._read_page(idx)
+            if image is None:
+                return None
 
         if sigma > 0:
             image = cv2.GaussianBlur(image, (0, 0), sigma)
         return image
 
+    def _fallback_frame(self):
+        if self.last_frame is not None:
+            return self.last_frame
+        return np.zeros((1, 1), dtype=np.uint8)
+
     def get_image(self):
         if self.camera_stopped:
-            if self.last_frame is not None:
-                return self.last_frame
-            else:
-                return np.zeros((1, 1))
+            return self._fallback_frame()
 
-        try:
-            with tf.TiffFile(self.path_to_tiff) as tif:
-                if self.frame_count < len(tif.pages):
-                    image = self._process_frame(tif, self.frame_count)
-                else:
-                    image = self.last_frame  # Return the last frame
-                    self.camera_stopped = True
-        except (FileNotFoundError, tf.TiffFileError):
-            image = np.zeros((1, 1))
+        n = self.get_num_frames()
+        if n and self.frame_count < n:
+            image = self._process_frame(self.frame_count)
+        else:
+            image = None
+            self.camera_stopped = True
 
-        #self.frame_count = (self.frame_count + 1) % self.max_frame_count
+        if image is None:
+            return self._fallback_frame().astype(np.uint8)
+        self.last_frame = image
         return image.astype(np.uint8)
 
     def get_specific_frame(self, frame):
         if self.camera_stopped:
-            if self.last_frame is not None:
-                return self.last_frame
-            else:
-                return np.zeros((1, 1))
-
-        if not isinstance(frame, int):
-            return np.zeros((1, 1))  # Return a default blank image
-
+            return self._fallback_frame()
 
         try:
-            with tf.TiffFile(self.path_to_tiff) as tif:
-                if self.frame_count < len(tif.pages):
-                    image = self._process_frame(tif, frame)
-                else:
-                    image = self.last_frame  # Return the last frame
-                    self.camera_stopped = True
-        except (FileNotFoundError, tf.TiffFileError):
-            image = np.zeros((1, 1))
+            frame = int(frame)
+        except (TypeError, ValueError):
+            return np.zeros((1, 1), dtype=np.uint8)
 
-        #self.frame_count = (self.frame_count + 1) % self.max_frame_count
+        n = self.get_num_frames()
+        if n and 0 <= frame < n:
+            image = self._process_frame(frame)
+        elif n and frame >= n:
+            image = None
+            self.camera_stopped = True
+        else:
+            image = self._process_frame(max(frame, 0))
+
+        if image is None:
+            return self._fallback_frame().astype(np.uint8)
+        self.last_frame = image
         return image.astype(np.uint8)
 
 
     def get_num_frames(self):
-        try:
-            with tf.TiffFile(self.path_to_tiff) as tif:
-                return len(tif.pages)
-        except (FileNotFoundError, tf.TiffFileError):
-            return 0
+        src = getattr(self, "_src", None)
+        return int(src.n_frames) if src is not None else 0
 
 
     def get_tiff_file_path(self):
@@ -622,7 +734,17 @@ class SavedDataCamera(CameraBase, camera_name="Image from file"):
         root.withdraw()  # Hide the main window
         sample_data_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "SampleData")
         initial_dir = sample_data_dir if os.path.isdir(sample_data_dir) else os.getcwd()
-        file_path = filedialog.askopenfilename(title="Select Multi-frame TIFF File", filetypes=[("TIFF files", "*.tiff *.tif")], initialdir=initial_dir)
+        video_glob = " ".join("*" + e for e in _VIDEO_EXTS)
+        file_path = filedialog.askopenfilename(
+            title="Select a multi-frame TIFF or a video file",
+            filetypes=[
+                ("Image / video files", "*.tif *.tiff " + video_glob),
+                ("Multi-frame TIFF", "*.tif *.tiff"),
+                ("Video", video_glob),
+                ("All files", "*.*"),
+            ],
+            initialdir=initial_dir,
+        )
         return file_path
 
     def next_position(self, state):
@@ -641,7 +763,13 @@ class SavedDataCamera(CameraBase, camera_name="Image from file"):
         pass
 
     def shutdown(self):
-        pass
+        src = getattr(self, "_src", None)
+        if src is not None:
+            try:
+                src.close()
+            except Exception:
+                pass
+            self._src = None
 
     def set_resolution(self, width, height):
         raise NotImplementedError("set_resolution is not implemented by ProxyCamera")

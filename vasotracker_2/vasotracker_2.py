@@ -231,6 +231,9 @@ class AnalysisPaneState:
     colormap: StringVar = field(default_factory=StringVar)
     # Fibrous-tissue detection mode (texture changepoints, see VT_Diameter)
     texture_tracking: BooleanVar = field(default_factory=BooleanVar)
+    # Vascular-ultrasound / flow-mediated-dilation wall model (see VT_Diameter,
+    # process_walls_fmd). Inner diameter is the lumen; outer is adventitia.
+    fmd_tracking: BooleanVar = field(default_factory=BooleanVar)
 
 
 @dataclass
@@ -903,6 +906,7 @@ def compute_diameters_and_rasterise(
     rotate_tracking: bool,
     ultrasound_tracking: bool,
     texture_tracking: bool = False,
+    fmd_tracking: bool = False,
     colormap: str = "Gray",
     edge_prior=None,
 ):
@@ -924,6 +928,7 @@ def compute_diameters_and_rasterise(
         rotate_tracking=rotate_tracking,
         ultrasound_tracking=ultrasound_tracking,
         texture_tracking=texture_tracking,
+        fmd_tracking=fmd_tracking,
         edge_prior=edge_prior,
     )
 
@@ -1351,6 +1356,11 @@ class Model:
         is_file_cam = self.state.camera is not None and self.state.camera.camera_name == "Image from file"
         display_cmap = tb.analysis.colormap.get() if is_file_cam else "Gray"
 
+        fmd_on = tb.analysis.fmd_tracking.get()
+        # FMD mode seeds each frame's wall search from the previous frame so
+        # the vessel can translate without the fixed ROI clipping it.
+        fmd_prior = self._prev_edges if fmd_on else None
+
         if self.executor is None:
             result = compute_diameters_and_rasterise(
                 im=im,
@@ -1368,7 +1378,9 @@ class Model:
                 rotate_tracking=tb.analysis.rotate_tracking.get(),
                 ultrasound_tracking=tb.analysis.ultrasound_tracking.get(),
                 texture_tracking=tb.analysis.texture_tracking.get(),
+                fmd_tracking=fmd_on,
                 colormap=display_cmap,
+                edge_prior=fmd_prior,
             )
             self.complete_processing(result)
         else:
@@ -1389,7 +1401,9 @@ class Model:
                 rotate_tracking=tb.analysis.rotate_tracking.get(),
                 ultrasound_tracking=tb.analysis.ultrasound_tracking.get(),
                 texture_tracking=tb.analysis.texture_tracking.get(),
+                fmd_tracking=fmd_on,
                 colormap=display_cmap,
+                edge_prior=fmd_prior,
             )
             self.futures_to_resolve.append(FutureAndCallbackFlag(future))
             self.resolve_next_pending_future()
@@ -1456,6 +1470,7 @@ class Model:
                     rotate_tracking=tb.analysis.rotate_tracking.get(),
                     ultrasound_tracking=tb.analysis.ultrasound_tracking.get(),
                     texture_tracking=tb.analysis.texture_tracking.get(),
+                    fmd_tracking=tb.analysis.fmd_tracking.get(),
                     colormap=tb.analysis.colormap.get() if is_file_cam else "Gray",
                     edge_prior=self._prev_edges,
                 )
@@ -2361,16 +2376,17 @@ class Model:
                         fluor = detect_fluorescence(first_frame)
                         self.state.toolbar.analysis.org.set(fluor)
                         print(f"Auto-detected image type: {'fluorescence (Fluor ON)' if fluor else 'transmitted light (Fluor off)'}")
-                        auto_s = auto_smooth_factor(
-                            first_frame, rotate,
-                            current=self.state.toolbar.analysis.smooth_factor.get(),
-                            lines_to_avg=self.state.toolbar.analysis.integration_factor.get(),
-                            num_lines=self.state.toolbar.analysis.num_lines.get(),
-                            default_detection_alg=fluor,
-                        )
-                        if auto_s is not None:
-                            self.state.toolbar.analysis.smooth_factor.set(auto_s)
-                            print(f"Auto-selected smoothing factor: {auto_s}")
+                        if not self.state.toolbar.analysis.fmd_tracking.get():
+                            auto_s = auto_smooth_factor(
+                                first_frame, rotate,
+                                current=self.state.toolbar.analysis.smooth_factor.get(),
+                                lines_to_avg=self.state.toolbar.analysis.integration_factor.get(),
+                                num_lines=self.state.toolbar.analysis.num_lines.get(),
+                                default_detection_alg=fluor,
+                            )
+                            if auto_s is not None:
+                                self.state.toolbar.analysis.smooth_factor.set(auto_s)
+                                print(f"Auto-selected smoothing factor: {auto_s}")
                 except Exception:
                     traceback.print_exc()
                 # Show the first frame and enable the slider without waiting for play
@@ -2451,6 +2467,7 @@ class Model:
             rotate_tracking=tb.analysis.rotate_tracking.get(),
             ultrasound_tracking=tb.analysis.ultrasound_tracking.get(),
             texture_tracking=tb.analysis.texture_tracking.get(),
+            fmd_tracking=tb.analysis.fmd_tracking.get(),
         )
         is_file_cam = self.state.camera is not None and self.state.camera.camera_name == "Image from file"
         display_cmap = tb.analysis.colormap.get() if is_file_cam else "Gray"
@@ -3075,6 +3092,9 @@ class AnalysisSettingsPane(ToolbarPane):
         self.texture_entry = ctk.CTkCheckBox(self.checkboxes_frame, text="Texture", font=(default_font, default_font_size), variable=sv.texture_tracking, checkbox_height=checkbox_height, checkbox_width=checkbox_width)
         self.texture_entry.grid(row=0, column=2, padx=padx, pady=pady, sticky=tk.NS)
 
+        self.fmd_entry = ctk.CTkCheckBox(self.checkboxes_frame, text="FMD", font=(default_font, default_font_size), variable=sv.fmd_tracking, checkbox_height=checkbox_height, checkbox_width=checkbox_width)
+        self.fmd_entry.grid(row=2, column=0, padx=padx, pady=pady, sticky=tk.NS)
+
         # Create a single tooltip instance for the container
         tooltip = ToolTip(self)
 
@@ -3089,6 +3109,12 @@ class AnalysisSettingsPane(ToolbarPane):
             self.ID_entry: "Enable or disable inner diameter tracking.",
             self.org_entry: "Enable or disable fluorescence tracking mode.",
             self.rotate_entry: "Switch between horizontal and vertical tracking.",
+            self.texture_entry: "Fibrous-tissue mode: detect walls by image texture, not intensity.",
+            self.fmd_entry: (
+                "Vascular ultrasound / flow-mediated dilation mode. B-mode wall "
+                "model: inner diameter = lumen (intima-intima), outer = adventitia. "
+                "Draw the ROI to bracket the vessel; enable ID for the lumen trace."
+            ),
         }
 
         for widget, text in tooltips.items():
@@ -5234,6 +5260,32 @@ class Controller:
                 )
 
         self.model.state.toolbar.analysis.texture_tracking.trace_add("write", _warn_fib_smoothing)
+
+        # The detection modes are mutually exclusive: FMD (B-mode wall model),
+        # Texture (fibrous changepoints) and US (legacy ultrasound) each replace
+        # the edge detector, so only one may be active.
+        _mode_vars = {
+            "fmd": self.model.state.toolbar.analysis.fmd_tracking,
+            "texture": self.model.state.toolbar.analysis.texture_tracking,
+            "us": self.model.state.toolbar.analysis.ultrasound_tracking,
+        }
+        self._syncing_modes = False
+
+        def _make_mode_guard(name):
+            def _guard(*args):
+                if self._syncing_modes or not _mode_vars[name].get():
+                    return
+                self._syncing_modes = True
+                try:
+                    for other, var in _mode_vars.items():
+                        if other != name and var.get():
+                            var.set(False)
+                finally:
+                    self._syncing_modes = False
+            return _guard
+
+        for _name, _var in _mode_vars.items():
+            _var.trace_add("write", _make_mode_guard(_name))
 
         self.output_path = None
 
