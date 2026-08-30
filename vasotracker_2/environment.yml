@@ -64,7 +64,7 @@ dependencies:
     - pygments==2.19.2
     - pyinstaller==6.17.0
     - pyinstaller-hooks-contrib==2025.11
-    - pymmcore==11.10.0.74.1
+    - pymmcore==12.5.0.75.0
     - pymmcore-plus==0.16.0
     - pyparsing==3.3.1
     - pyqt5==5.15.11

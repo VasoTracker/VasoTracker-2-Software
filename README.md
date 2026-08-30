@@ -1,12 +1,13 @@
-# VasoTracker 2.3 - Blood Vessel Diameter Tracking Software (online and offline analysis)
+# VasoTracker 2.4 - Blood Vessel Diameter Tracking Software (online and offline analysis)
 
-The VasoTracker 2.3 software is a comprehensive software solution designed for the acquisition and analysis of blood vessel imaging data. It supports both live and pre-recorded video analysis, making it adaptable for various experimental set ups. It was initially developed for pressure myography, but it works for many other types of imaging!
+The VasoTracker 2.4 software is a comprehensive software solution designed for the acquisition and analysis of blood vessel imaging data. It supports both live and pre-recorded video analysis, making it adaptable for various experimental set ups. It was initially developed for pressure myography, but it works for many other types of imaging!
 
 ![til](https://github.com/VasoTracker/VasoTracker-2-Software/blob/main/VasoTracker%20GUI.gif)
 
 
 
 ## Table of Contents
+- [What's New in v2.4](#whats-new-in-v24)
 - [What's New in v2.3](#whats-new-in-v23)
 - [What's New in v2.2](#whats-new-in-v22)
 - [Key Features](#key-features)
@@ -15,6 +16,17 @@ The VasoTracker 2.3 software is a comprehensive software solution designed for t
   - [From Source](#option-2-installing-from-source-using-anaconda)
 - [License](#license)
 - [Issues](#issues)
+
+---
+
+## What's New in v2.4 (August 2026)
+
+* **Micro-Manager: install it yourself.** VasoTracker no longer downloads or installs Micro-Manager. It needs one specific nightly build (currently `20260828`, device interface 75); if a compatible install isn't found it names the exact build, lists any incompatible ones it did find, and opens the download page. Install that nightly the normal way (default location) and it's picked up automatically. Supports current Micro-Manager nightlies.
+* **Choose your Micro-Manager config.** Selecting the "MMConfig" camera opens a chooser: pick from the `.cfg` files found next to your Micro-Manager install (or browse to one), test it with a live preview, then use it. The choice is remembered.
+* **Recording is a proper time-lapse.** Fixed the frame-interval logic (previously it only saved on exact whole-second boundaries, so most settings saved nothing); files now flush to disk continuously and survive a crash; default interval lowered to 10 s. New "incl. tracked overlay" toggle - turn it off to save only the raw stack + CSV. Recorded TIFFs are now compressed (lossless, ~2-3x smaller) and carry a `Frame` number matching the new `Frame` column in the results CSV.
+* **Snapshot works again.** The Snapshot button had been calling a removed function since January and did nothing; restored, with filenames that don't overwrite each other.
+* **Runs from any working directory.** Fixed icon/image/config resource paths that only resolved when the app was launched from inside its own folder.
+* **Settings file no longer churns.** Saving settings was silently corrupting three values (`integration`, inner-diameter axis max, default pressure) on every write.
 
 ---
 
@@ -75,10 +87,13 @@ VasoTracker can be installed using either the standalone executable file for str
    - Right-click the file and select "Extract All..." or use your preferred extraction software.
    - Choose a destination folder to extract the files and confirm the action.
 
-3. **Run VasoTracker:**
+3. **Install Micro-Manager:**
+   - VasoTracker needs the **Micro-Manager 2.0 nightly build dated `20260828`** (Windows). Download it from the [Micro-Manager nightly archive](https://download.micro-manager.org/nightly/2.0/Windows/) and run the installer (the default location is fine).
+   - A different Micro-Manager version will not work - VasoTracker's imaging core is tied to one specific build. If it starts and can't find a compatible install, it names the exact one to get.
+
+4. **Run VasoTracker:**
    - Navigate to the extracted folder.
    - Double-click the executable file to start the application.
-   - **On first run**, VasoTracker will automatically download and install the required Micro-Manager components. This may take a few minutes.
 
 #### Using Webcams and USB Cameras
 
@@ -93,9 +108,9 @@ VasoTracker supports Basler and Thorlabs cameras out of the box. For webcams and
 
 For cameras requiring specific Micro-Manager device adapters:
 
-1. **Open Micro-Manager** (automatically installed by VasoTracker):
+1. **Open Micro-Manager** (the nightly you installed above):
    ```
-   C:\Users\<YourName>\AppData\Local\pymmcore-plus\pymmcore-plus\mm\<version>\ImageJ.exe
+   C:\Program Files\Micro-Manager-2.0\ImageJ.exe
    ```
 
 2. **Create a hardware configuration:**

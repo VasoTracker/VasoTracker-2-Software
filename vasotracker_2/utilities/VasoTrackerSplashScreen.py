@@ -34,8 +34,15 @@ import json
 # The following is so that the required resources are included in the PyInstaller build.
 # Utility functions
 def get_resource_path(relative_path):
-    """Get the path to a resource, whether it's bundled with PyInstaller or not."""
-    base_path = getattr(sys, '_MEIPASS', os.path.abspath("."))
+    """Get the path to a resource, whether it's bundled with PyInstaller or not.
+
+    From source, resources live in the vasotracker_2 folder (the parent of this
+    utilities/ package), not the current working directory.
+    """
+    base_path = getattr(
+        sys, "_MEIPASS",
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    )
     return os.path.join(base_path, relative_path)
 
 # Resource paths
@@ -87,7 +94,7 @@ class VasoTrackerSplashScreen(ctk.CTkFrame):
         copy_image = self.image2
 
     # Add the various frames
-        top_frame = Frame(self.splash_win, bd=0, width = self.imagewidth, height = self.imageheight, bg='red', relief=SOLID, padx=0, pady=0)
+        top_frame = Frame(self.splash_win, bd=0, width = self.imagewidth, height = self.imageheight, bg='#0B5A81', relief=SOLID, padx=0, pady=0)
         #top_frame.grid_propagate(1)
         top_middle_Frame = Frame(self.splash_win, bd=0,width = self.imagewidth, bg='#CCCCCC',   relief=SOLID, padx=0, pady=0)
         top_middle_Frame.grid_propagate(1)

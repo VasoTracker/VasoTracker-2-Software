@@ -302,6 +302,15 @@ def calculate_diameter(
         if total_height % (num_lines + 1) == 0:
             end += 1
 
+        line_ys = list(range(start, end, diff))
+        # In 90-degree mode np.rot90 (counter-clockwise) maps the vessel's
+        # right end to the top of the rotated image, so ascending rotated-y
+        # runs right-to-left across the displayed vessel. Reverse so line 1
+        # (and the first Profiles column) is the LEFT end, matching how the
+        # numbered overlay / _ROIs.png reads.
+        if rotate_tracking:
+            line_ys = line_ys[::-1]
+
         data = [
             np.average(
                 image[
@@ -310,10 +319,10 @@ def calculate_diameter(
                 ],
                 axis=0
             )
-            for y in range(start, end, diff)
+            for y in line_ys
         ]
 
-        for y in range(start, end, diff):
+        for y in line_ys:
             y_pos.append((y, y))
 
         start_x = [start_x] * len(data)  # Ensure tracking alignment
