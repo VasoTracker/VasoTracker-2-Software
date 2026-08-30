@@ -224,6 +224,10 @@ class AnalysisPaneState:
     org: BooleanVar = field(default_factory=BooleanVar)
     roi: BooleanVar = field(default_factory=BooleanVar)
     rotate_tracking: BooleanVar = field(default_factory=BooleanVar)
+    # "US" checkbox. Ticking it opens a chooser that sets exactly one of the
+    # two ultrasound algorithm flags below (legacy edge detector vs FMD wall
+    # model); unticking clears both.
+    us_enabled: BooleanVar = field(default_factory=BooleanVar)
     ultrasound_tracking: BooleanVar = field(default_factory=BooleanVar)
     # Image processing for prerecorded files (see Settings -> Image Processing)
     gauss_sigma: DoubleVar = field(default_factory=DoubleVar)
@@ -231,6 +235,9 @@ class AnalysisPaneState:
     colormap: StringVar = field(default_factory=StringVar)
     # Fibrous-tissue detection mode (texture changepoints, see VT_Diameter)
     texture_tracking: BooleanVar = field(default_factory=BooleanVar)
+    # Vascular-ultrasound / flow-mediated-dilation wall model (see VT_Diameter,
+    # process_walls_fmd). Inner diameter is the lumen; outer is adventitia.
+    fmd_tracking: BooleanVar = field(default_factory=BooleanVar)
 
 
 @dataclass
@@ -903,6 +910,7 @@ def compute_diameters_and_rasterise(
     rotate_tracking: bool,
     ultrasound_tracking: bool,
     texture_tracking: bool = False,
+    fmd_tracking: bool = False,
     colormap: str = "Gray",
     edge_prior=None,
 ):
@@ -924,6 +932,7 @@ def compute_diameters_and_rasterise(
         rotate_tracking=rotate_tracking,
         ultrasound_tracking=ultrasound_tracking,
         texture_tracking=texture_tracking,
+        fmd_tracking=fmd_tracking,
         edge_prior=edge_prior,
     )
 
@@ -1351,6 +1360,11 @@ class Model:
         is_file_cam = self.state.camera is not None and self.state.camera.camera_name == "Image from file"
         display_cmap = tb.analysis.colormap.get() if is_file_cam else "Gray"
 
+        fmd_on = tb.analysis.fmd_tracking.get()
+        # FMD mode seeds each frame's wall search from the previous frame so
+        # the vessel can translate without the fixed ROI clipping it.
+        fmd_prior = self._prev_edges if fmd_on else None
+
         if self.executor is None:
             result = compute_diameters_and_rasterise(
                 im=im,
@@ -1368,7 +1382,9 @@ class Model:
                 rotate_tracking=tb.analysis.rotate_tracking.get(),
                 ultrasound_tracking=tb.analysis.ultrasound_tracking.get(),
                 texture_tracking=tb.analysis.texture_tracking.get(),
+                fmd_tracking=fmd_on,
                 colormap=display_cmap,
+                edge_prior=fmd_prior,
             )
             self.complete_processing(result)
         else:
@@ -1389,7 +1405,9 @@ class Model:
                 rotate_tracking=tb.analysis.rotate_tracking.get(),
                 ultrasound_tracking=tb.analysis.ultrasound_tracking.get(),
                 texture_tracking=tb.analysis.texture_tracking.get(),
+                fmd_tracking=fmd_on,
                 colormap=display_cmap,
+                edge_prior=fmd_prior,
             )
             self.futures_to_resolve.append(FutureAndCallbackFlag(future))
             self.resolve_next_pending_future()
@@ -1456,6 +1474,7 @@ class Model:
                     rotate_tracking=tb.analysis.rotate_tracking.get(),
                     ultrasound_tracking=tb.analysis.ultrasound_tracking.get(),
                     texture_tracking=tb.analysis.texture_tracking.get(),
+                    fmd_tracking=tb.analysis.fmd_tracking.get(),
                     colormap=tb.analysis.colormap.get() if is_file_cam else "Gray",
                     edge_prior=self._prev_edges,
                 )
@@ -2361,16 +2380,17 @@ class Model:
                         fluor = detect_fluorescence(first_frame)
                         self.state.toolbar.analysis.org.set(fluor)
                         print(f"Auto-detected image type: {'fluorescence (Fluor ON)' if fluor else 'transmitted light (Fluor off)'}")
-                        auto_s = auto_smooth_factor(
-                            first_frame, rotate,
-                            current=self.state.toolbar.analysis.smooth_factor.get(),
-                            lines_to_avg=self.state.toolbar.analysis.integration_factor.get(),
-                            num_lines=self.state.toolbar.analysis.num_lines.get(),
-                            default_detection_alg=fluor,
-                        )
-                        if auto_s is not None:
-                            self.state.toolbar.analysis.smooth_factor.set(auto_s)
-                            print(f"Auto-selected smoothing factor: {auto_s}")
+                        if not self.state.toolbar.analysis.fmd_tracking.get():
+                            auto_s = auto_smooth_factor(
+                                first_frame, rotate,
+                                current=self.state.toolbar.analysis.smooth_factor.get(),
+                                lines_to_avg=self.state.toolbar.analysis.integration_factor.get(),
+                                num_lines=self.state.toolbar.analysis.num_lines.get(),
+                                default_detection_alg=fluor,
+                            )
+                            if auto_s is not None:
+                                self.state.toolbar.analysis.smooth_factor.set(auto_s)
+                                print(f"Auto-selected smoothing factor: {auto_s}")
                 except Exception:
                     traceback.print_exc()
                 # Show the first frame and enable the slider without waiting for play
@@ -2451,6 +2471,7 @@ class Model:
             rotate_tracking=tb.analysis.rotate_tracking.get(),
             ultrasound_tracking=tb.analysis.ultrasound_tracking.get(),
             texture_tracking=tb.analysis.texture_tracking.get(),
+            fmd_tracking=tb.analysis.fmd_tracking.get(),
         )
         is_file_cam = self.state.camera is not None and self.state.camera.camera_name == "Image from file"
         display_cmap = tb.analysis.colormap.get() if is_file_cam else "Gray"
@@ -3069,8 +3090,8 @@ class AnalysisSettingsPane(ToolbarPane):
         self.rotate_entry = ctk.CTkCheckBox(self.checkboxes_frame, text="90\u00B0", font=(default_font, default_font_size), variable=sv.rotate_tracking, checkbox_height=checkbox_height, checkbox_width=checkbox_width)
         self.rotate_entry.grid(row=1, column=1, padx=padx, pady=pady, sticky=tk.NS)  # Moved to the third column for consistency
 
-        self.org_entry = ctk.CTkCheckBox(self.checkboxes_frame, text="US", font=(default_font, default_font_size), variable=sv.ultrasound_tracking, checkbox_height=checkbox_height, checkbox_width=checkbox_width)
-        self.org_entry.grid(row=1, column=2, padx=padx, pady=pady, sticky=tk.NS)  # Moved to the third column for consistency
+        self.us_entry = ctk.CTkCheckBox(self.checkboxes_frame, text="US", font=(default_font, default_font_size), variable=sv.us_enabled, checkbox_height=checkbox_height, checkbox_width=checkbox_width)
+        self.us_entry.grid(row=1, column=2, padx=padx, pady=pady, sticky=tk.NS)  # Moved to the third column for consistency
 
         self.texture_entry = ctk.CTkCheckBox(self.checkboxes_frame, text="Texture", font=(default_font, default_font_size), variable=sv.texture_tracking, checkbox_height=checkbox_height, checkbox_width=checkbox_width)
         self.texture_entry.grid(row=0, column=2, padx=padx, pady=pady, sticky=tk.NS)
@@ -3089,6 +3110,12 @@ class AnalysisSettingsPane(ToolbarPane):
             self.ID_entry: "Enable or disable inner diameter tracking.",
             self.org_entry: "Enable or disable fluorescence tracking mode.",
             self.rotate_entry: "Switch between horizontal and vertical tracking.",
+            self.texture_entry: "Fibrous-tissue mode: detect walls by image texture, not intensity.",
+            self.us_entry: (
+                "Ultrasound mode. Opens a chooser: 'Vascular wall tracking (FMD)' "
+                "- B-mode wall model, inner diameter = lumen - or 'Standard "
+                "ultrasound' (the original edge detector)."
+            ),
         }
 
         for widget, text in tooltips.items():
@@ -4404,7 +4431,18 @@ class GraphFrame(ttk.Frame):
         self._bg_stale = True
         self.figure.canvas.draw()
         self.toolbar.update()
+        self._reblit_after_limits()
 
+    def _reblit_after_limits(self):
+        """canvas.draw() renders everything except the animated trace artists,
+        so after an axis-limit change the plotted lines vanish until the next
+        frame arrives. Force the blit path to re-render them onto the fresh
+        background now."""
+        try:
+            self._bg_stale = True
+            self.state_vars.graph.dirty.set(True)
+        except Exception:
+            pass
 
     def update_lims_callback(self):
         settings = self.state_vars.toolbar.graph
@@ -4463,6 +4501,7 @@ class GraphFrame(ttk.Frame):
             # Mark background as stale and redraw
             self._bg_stale = True
             self.figure.canvas.draw()
+            self._reblit_after_limits()
 
             # Reset the limits dirty flag
             settings.limits_dirty.set(False)
@@ -5235,6 +5274,62 @@ class Controller:
 
         self.model.state.toolbar.analysis.texture_tracking.trace_add("write", _warn_fib_smoothing)
 
+        # Detection modes are mutually exclusive - each one replaces the edge
+        # detector. The "US" checkbox is a group toggle: ticking it opens a
+        # chooser that sets exactly one of the two ultrasound algorithms.
+        _an = self.model.state.toolbar.analysis
+        self._syncing_modes = False
+
+        def _clear_us(*_):
+            _an.ultrasound_tracking.set(False)
+            _an.fmd_tracking.set(False)
+
+        def _apply_us_choice(choice):
+            self._syncing_modes = True
+            try:
+                if choice == "fmd":
+                    _an.ultrasound_tracking.set(False)
+                    _an.fmd_tracking.set(True)
+                elif choice == "legacy":
+                    _an.fmd_tracking.set(False)
+                    _an.ultrasound_tracking.set(True)
+                else:  # cancelled - untick the checkbox again
+                    _an.us_enabled.set(False)
+                    _clear_us()
+            finally:
+                self._syncing_modes = False
+
+        def _on_us_toggle(*_):
+            if self._syncing_modes:
+                return
+            if not _an.us_enabled.get():
+                _clear_us()
+                return
+            if _an.texture_tracking.get():
+                self._syncing_modes = True
+                try:
+                    _an.texture_tracking.set(False)
+                finally:
+                    self._syncing_modes = False
+            self.ask_ultrasound_mode(
+                _apply_us_choice,
+                fmd=_an.fmd_tracking.get() or not _an.ultrasound_tracking.get(),
+            )
+
+        def _on_texture_toggle(*_):
+            if self._syncing_modes:
+                return
+            if _an.texture_tracking.get() and _an.us_enabled.get():
+                self._syncing_modes = True
+                try:
+                    _an.us_enabled.set(False)
+                    _clear_us()
+                finally:
+                    self._syncing_modes = False
+
+        _an.us_enabled.trace_add("write", _on_us_toggle)
+        _an.texture_tracking.trace_add("write", _on_texture_toggle)
+
         self.output_path = None
 
         #output_path = self.get_output_filename()
@@ -5524,6 +5619,74 @@ class Controller:
             self.model.to_config().save(override_path=self.model.user_config_path)
         except Exception:
             traceback.print_exc()
+
+    def ask_ultrasound_mode(self, on_choice, fmd=True):
+        """Chooser shown when the 'US' checkbox is ticked. Calls
+        ``on_choice('fmd' | 'legacy' | None)`` when dismissed (None =
+        cancelled). ``fmd`` sets which option is pre-selected. Non-blocking:
+        the work happens in the button callbacks."""
+        popup = tk.Toplevel(root)
+        popup.title("Ultrasound analysis mode")
+        try:
+            popup.iconbitmap(os.path.join(images_folder, "vt_icon.ICO"))
+        except Exception:
+            pass
+        popup.resizable(False, False)
+        popup.transient(root)
+        popup.grab_set()
+
+        frm = tk.Frame(popup)
+        frm.pack(padx=16, pady=14)
+        tk.Label(
+            frm, text="How should ultrasound images be analysed?",
+            font=(default_font, default_font_size, "bold"), justify=tk.LEFT,
+        ).grid(row=0, column=0, columnspan=2, sticky=tk.W, pady=(0, 10))
+
+        choice = tk.StringVar(value="fmd" if fmd else "legacy")
+        tk.Radiobutton(
+            frm, text="Vascular wall tracking (FMD)", value="fmd",
+            variable=choice, font=(default_font, default_font_size),
+        ).grid(row=1, column=0, columnspan=2, sticky=tk.W)
+        tk.Label(
+            frm, text="B-mode wall model. Inner diameter = lumen (intima-intima),\n"
+            "outer = wall-to-wall. Best for artery diameter / FMD studies.",
+            font=(default_font, 9), fg="gray30", justify=tk.LEFT,
+        ).grid(row=2, column=0, columnspan=2, sticky=tk.W, padx=(22, 0), pady=(0, 8))
+        tk.Radiobutton(
+            frm, text="Standard ultrasound (legacy)", value="legacy",
+            variable=choice, font=(default_font, default_font_size),
+        ).grid(row=3, column=0, columnspan=2, sticky=tk.W)
+        tk.Label(
+            frm, text="The original ultrasound edge detector (median filter +\n"
+            "strongest gradient each side).",
+            font=(default_font, 9), fg="gray30", justify=tk.LEFT,
+        ).grid(row=4, column=0, columnspan=2, sticky=tk.W, padx=(22, 0), pady=(0, 10))
+
+        done = {"called": False}
+
+        def _finish(value):
+            if done["called"]:
+                return
+            done["called"] = True
+            try:
+                popup.grab_release()
+                popup.destroy()
+            except Exception:
+                pass
+            on_choice(value)
+
+        btns = tk.Frame(frm)
+        btns.grid(row=5, column=0, columnspan=2, sticky=tk.E)
+        tk.Button(btns, text="Cancel", width=10,
+                  command=lambda: _finish(None)).pack(side=tk.RIGHT, padx=4)
+        tk.Button(btns, text="OK", width=10,
+                  command=lambda: _finish(choice.get())).pack(side=tk.RIGHT)
+        popup.protocol("WM_DELETE_WINDOW", lambda: _finish(None))
+
+        popup.update_idletasks()
+        popup.geometry(
+            "+%d+%d" % (root.winfo_rootx() + 120, root.winfo_rooty() + 120)
+        )
 
     def open_mm_config_dialog(self):
         """Pick the Micro-Manager system configuration for the 'MMConfig'

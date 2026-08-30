@@ -867,6 +867,195 @@ def process_ddts(
     )
 
 
+def _theil_sen_predict(vals):
+    """Robust linear trend of a per-scanline quantity vs scanline index."""
+    vals = np.asarray(vals, dtype=float)
+    n = len(vals)
+    idx = np.arange(n, dtype=float)
+    if n < 2:
+        return vals.copy()
+    slopes = [
+        (vals[b] - vals[a]) / (b - a)
+        for a in range(n)
+        for b in range(a + 1, n)
+    ]
+    slope = np.median(slopes)
+    intercept = np.median(vals - slope * idx)
+    return intercept + slope * idx
+
+
+def _subpixel_extremum(v, i):
+    """Parabolic sub-pixel position of the extremum of `v` nearest index `i`."""
+    if i <= 0 or i >= len(v) - 1:
+        return float(i)
+    a, b, c = float(v[i - 1]), float(v[i]), float(v[i + 1])
+    denom = a - 2.0 * b + c
+    if denom == 0.0:
+        return float(i)
+    return i + 0.5 * (a - c) / denom
+
+
+def _fmd_one_profile(prof, sigma, prior_pair, search_frac):
+    """Locate (outer_near, inner_near, inner_far, outer_far) in one depth
+    profile that runs across the vessel: tissue - near wall - anechoic lumen -
+    far wall - tissue. Returns indices into `prof` or None.
+
+    inner_* are the lumen-intima interfaces (the FMD lumen diameter); outer_*
+    are the adventitial sides of each wall complex.
+    """
+    p = ndimage.gaussian_filter1d(np.asarray(prof, dtype=float), sigma)
+    g = np.gradient(p)
+    n = len(p)
+    if n < 12:
+        return None
+
+    if prior_pair is not None:
+        # Constrain the wall-peak search near last frame's lumen edges.
+        pn, pf = sorted(prior_pair)
+        tol = max(8.0, 0.35 * abs(pf - pn))
+        n_lo, n_hi = pn - tol, pn + tol
+        f_lo, f_hi = pf - tol, pf + tol
+    else:
+        lo, hi = search_frac
+        n_lo, n_hi = lo * n, 0.60 * n
+        f_lo, f_hi = 0.40 * n, hi * n
+    n_lo = int(np.clip(n_lo, 1, n - 6))
+    n_hi = int(np.clip(n_hi, n_lo + 2, n - 4))
+    f_hi = int(np.clip(f_hi, n_lo + 6, n - 1))
+    f_lo = int(np.clip(f_lo, n_lo + 4, f_hi - 2))
+
+    # darkest interior point = lumen centre; walls are the maxima either side
+    mid_lo, mid_hi = max(n_lo, 1), min(f_hi, n - 1)
+    if mid_hi - mid_lo < 3:
+        return None
+    lumen_c = mid_lo + int(np.argmin(p[mid_lo:mid_hi]))
+    near_hi = int(np.clip(min(n_hi, lumen_c), n_lo + 2, n - 2))
+    near_pk = n_lo + int(np.argmax(p[n_lo:near_hi]))
+    far_lo = int(np.clip(max(lumen_c + 1, f_lo), near_pk + 4, f_hi - 2))
+    far_pk = far_lo + int(np.argmax(p[far_lo:f_hi]))
+    if far_pk - near_pk < 6:
+        return None
+
+    half = near_pk + (far_pk - near_pk) // 2
+    # lumen-side gradients: bright->dark just past the near peak (min gradient),
+    # dark->bright just before the far peak (max gradient)
+    ni_seg = g[near_pk:half + 1]
+    fi_seg = g[half:far_pk + 1]
+    if ni_seg.size < 2 or fi_seg.size < 2:
+        return None
+    ni = _subpixel_extremum(g, near_pk + int(np.argmin(ni_seg)))
+    fi = _subpixel_extremum(g, half + int(np.argmax(fi_seg)))
+    # Outer diameter = the wall reflections themselves (peak-to-peak). The
+    # adventitial gradient is unreliable on cluttered B-mode; the peaks are
+    # stable and give a sensible wall-centre-to-wall-centre outer measure.
+    on, of = float(near_pk), float(far_pk)
+    if not (on <= ni < fi <= of):
+        return None
+    return on, ni, fi, of
+
+
+def process_walls_fmd(
+    data, start_x, scale, thresh_factor, compute_id,
+    smooth_factor=16, consensus=True, edge_prior=None,
+) -> DdtResult:
+    """B-mode vascular-ultrasound wall tracker for flow-mediated dilation.
+
+    Each ``data[j]`` is a depth profile across the vessel, already averaged
+    over a run of positions along the vessel by the ROI line-integration
+    setting (speckle on a single line swamps the wall gradients otherwise).
+
+    Per profile it fits an explicit wall model - the two bright wall
+    reflections either side of the anechoic lumen - and reports:
+      * inner diameter = the lumen-intima interfaces (the FMD measurement)
+      * outer diameter = the adventitial sides of the two wall complexes
+    A robust cross-profile line fit repairs profiles that disagree with the
+    trend; an optional ``edge_prior`` (previous frame's lumen edges) narrows
+    the search while the vessel translates.
+    """
+    start_x = [int(x) for x in start_x]
+    n_lines = len(data)
+    sigma = max(1.0, float(smooth_factor) / 8.0)
+
+    prior = None
+    if edge_prior is not None and len(edge_prior[0]) == n_lines:
+        prior = [
+            (float(edge_prior[0][k]) - start_x[k], float(edge_prior[1][k]) - start_x[k])
+            for k in range(n_lines)
+        ]
+
+    on = np.full(n_lines, np.nan)
+    ni = np.full(n_lines, np.nan)
+    fi = np.full(n_lines, np.nan)
+    of = np.full(n_lines, np.nan)
+    for k, prof in enumerate(data):
+        r = _fmd_one_profile(prof, sigma, prior[k] if prior else None, (0.05, 0.95))
+        if r is None and prior:
+            r = _fmd_one_profile(prof, sigma, None, (0.05, 0.95))
+        if r is None:
+            continue
+        o1, i1, i2, o2 = r
+        on[k], ni[k], fi[k], of[k] = (o1 + start_x[k], i1 + start_x[k],
+                                      i2 + start_x[k], o2 + start_x[k])
+
+    # Cross-profile consensus: the lumen edges must follow a smooth trend
+    # along the scanline sequence. Re-pick outliers near the robust fit.
+    good = np.isfinite(ni) & np.isfinite(fi)
+    if consensus and good.sum() >= 5:
+        pred_n = _theil_sen_predict(np.where(good, ni, np.nanmedian(ni[good])))
+        pred_f = _theil_sen_predict(np.where(good, fi, np.nanmedian(fi[good])))
+        med_w = float(np.nanmedian(fi[good] - ni[good]))
+        tol = max(6.0, 0.30 * med_w)
+        for k, prof in enumerate(data):
+            if good[k] and abs(ni[k] - pred_n[k]) <= tol and abs(fi[k] - pred_f[k]) <= tol:
+                continue
+            r = _fmd_one_profile(
+                prof, sigma,
+                (pred_n[k] - start_x[k], pred_f[k] - start_x[k]), (0.05, 0.95),
+            )
+            if r is None:
+                continue
+            o1, i1, i2, o2 = r
+            on[k], ni[k], fi[k], of[k] = (o1 + start_x[k], i1 + start_x[k],
+                                          i2 + start_x[k], o2 + start_x[k])
+        good = np.isfinite(ni) & np.isfinite(fi)
+
+    # Fill any still-missing profiles from the trend so downstream shapes hold.
+    if good.any():
+        fill_n = _theil_sen_predict(np.where(good, ni, np.nanmedian(ni[good])))
+        fill_f = _theil_sen_predict(np.where(good, fi, np.nanmedian(fi[good])))
+        fill_on = _theil_sen_predict(np.where(good, on, np.nanmedian(on[good])))
+        fill_of = _theil_sen_predict(np.where(good, of, np.nanmedian(of[good])))
+        bad = ~good
+        ni[bad], fi[bad] = fill_n[bad], fill_f[bad]
+        on[bad], of[bad] = fill_on[bad], fill_of[bad]
+    else:
+        # nothing found - hand back a degenerate result
+        z = np.zeros(n_lines)
+        return DdtResult(
+            outer_diam_pos=np.column_stack((z, z)).astype(int),
+            inner_diam_pos=np.column_stack((z, z)),
+            od_outliers=np.ones(n_lines, dtype=bool),
+            id_outliers=np.ones(n_lines, dtype=bool),
+            outer_diam=z, inner_diam=np.full(n_lines, np.nan),
+        )
+
+    ODS = scale * (of - on)
+    IDS = scale * (fi - ni)
+    if not compute_id:
+        ni[:] = np.nan
+        fi[:] = np.nan
+        IDS = np.full(n_lines, np.nan)
+
+    return DdtResult(
+        outer_diam_pos=np.nan_to_num(np.column_stack((on, of))).astype(int),
+        inner_diam_pos=np.column_stack((ni, fi)),
+        od_outliers=is_outlier(np.asarray(ODS), thresh_factor),
+        id_outliers=(is_outlier(np.asarray(IDS), thresh_factor)
+                     if compute_id else np.zeros(n_lines, dtype=bool)),
+        outer_diam=ODS,
+        inner_diam=IDS,
+    )
+
 
 ### Outlier function is from here:
 ### https://stackoverflow.com/questions/22354094/pythonic-way-of-detecting-outliers-in-one-dimensional-observation-data
