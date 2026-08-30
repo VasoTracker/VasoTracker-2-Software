@@ -8,7 +8,7 @@
 ##################################################
 
 
-__version__ = "2.4.0"
+__version__ = "2.4.1"
 
 # Micro-Manager compatibility pins - keep these two in sync (MICROMANAGER.md).
 # MM_DEVICE_INTERFACE must equal the device interface version of the pymmcore

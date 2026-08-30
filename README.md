@@ -7,6 +7,7 @@ The VasoTracker 2.4 software is a comprehensive software solution designed for t
 
 
 ## Table of Contents
+- [What's New in v2.4.1](#whats-new-in-v241)
 - [What's New in v2.4](#whats-new-in-v24)
 - [What's New in v2.3](#whats-new-in-v23)
 - [What's New in v2.2](#whats-new-in-v22)
@@ -16,6 +17,12 @@ The VasoTracker 2.4 software is a comprehensive software solution designed for t
   - [From Source](#option-2-installing-from-source-using-anaconda)
 - [License](#license)
 - [Issues](#issues)
+
+---
+
+## What's New in v2.4.1 (August 2026)
+
+* **Recorded TIFFs open in classic ImageJ again.** v2.4.0 wrote recordings as BigTIFF, which ImageJ's built-in reader (without Bio-Formats) rejects as an unsupported format. Recordings are now standard TIFF - they still roll over to a new file below 4 GB, and the lossless Deflate compression is unchanged and ImageJ-readable.
 
 ---
 
