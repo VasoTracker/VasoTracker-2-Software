@@ -224,6 +224,10 @@ class AnalysisPaneState:
     org: BooleanVar = field(default_factory=BooleanVar)
     roi: BooleanVar = field(default_factory=BooleanVar)
     rotate_tracking: BooleanVar = field(default_factory=BooleanVar)
+    # "US" checkbox. Ticking it opens a chooser that sets exactly one of the
+    # two ultrasound algorithm flags below (legacy edge detector vs FMD wall
+    # model); unticking clears both.
+    us_enabled: BooleanVar = field(default_factory=BooleanVar)
     ultrasound_tracking: BooleanVar = field(default_factory=BooleanVar)
     # Image processing for prerecorded files (see Settings -> Image Processing)
     gauss_sigma: DoubleVar = field(default_factory=DoubleVar)
@@ -3086,14 +3090,11 @@ class AnalysisSettingsPane(ToolbarPane):
         self.rotate_entry = ctk.CTkCheckBox(self.checkboxes_frame, text="90\u00B0", font=(default_font, default_font_size), variable=sv.rotate_tracking, checkbox_height=checkbox_height, checkbox_width=checkbox_width)
         self.rotate_entry.grid(row=1, column=1, padx=padx, pady=pady, sticky=tk.NS)  # Moved to the third column for consistency
 
-        self.org_entry = ctk.CTkCheckBox(self.checkboxes_frame, text="US", font=(default_font, default_font_size), variable=sv.ultrasound_tracking, checkbox_height=checkbox_height, checkbox_width=checkbox_width)
-        self.org_entry.grid(row=1, column=2, padx=padx, pady=pady, sticky=tk.NS)  # Moved to the third column for consistency
+        self.us_entry = ctk.CTkCheckBox(self.checkboxes_frame, text="US", font=(default_font, default_font_size), variable=sv.us_enabled, checkbox_height=checkbox_height, checkbox_width=checkbox_width)
+        self.us_entry.grid(row=1, column=2, padx=padx, pady=pady, sticky=tk.NS)  # Moved to the third column for consistency
 
         self.texture_entry = ctk.CTkCheckBox(self.checkboxes_frame, text="Texture", font=(default_font, default_font_size), variable=sv.texture_tracking, checkbox_height=checkbox_height, checkbox_width=checkbox_width)
         self.texture_entry.grid(row=0, column=2, padx=padx, pady=pady, sticky=tk.NS)
-
-        self.fmd_entry = ctk.CTkCheckBox(self.checkboxes_frame, text="FMD", font=(default_font, default_font_size), variable=sv.fmd_tracking, checkbox_height=checkbox_height, checkbox_width=checkbox_width)
-        self.fmd_entry.grid(row=2, column=0, padx=padx, pady=pady, sticky=tk.NS)
 
         # Create a single tooltip instance for the container
         tooltip = ToolTip(self)
@@ -3110,10 +3111,10 @@ class AnalysisSettingsPane(ToolbarPane):
             self.org_entry: "Enable or disable fluorescence tracking mode.",
             self.rotate_entry: "Switch between horizontal and vertical tracking.",
             self.texture_entry: "Fibrous-tissue mode: detect walls by image texture, not intensity.",
-            self.fmd_entry: (
-                "Vascular ultrasound / flow-mediated dilation mode. B-mode wall "
-                "model: inner diameter = lumen (intima-intima), outer = adventitia. "
-                "Draw the ROI to bracket the vessel; enable ID for the lumen trace."
+            self.us_entry: (
+                "Ultrasound mode. Opens a chooser: 'Vascular wall tracking (FMD)' "
+                "- B-mode wall model, inner diameter = lumen - or 'Standard "
+                "ultrasound' (the original edge detector)."
             ),
         }
 
@@ -5261,31 +5262,61 @@ class Controller:
 
         self.model.state.toolbar.analysis.texture_tracking.trace_add("write", _warn_fib_smoothing)
 
-        # The detection modes are mutually exclusive: FMD (B-mode wall model),
-        # Texture (fibrous changepoints) and US (legacy ultrasound) each replace
-        # the edge detector, so only one may be active.
-        _mode_vars = {
-            "fmd": self.model.state.toolbar.analysis.fmd_tracking,
-            "texture": self.model.state.toolbar.analysis.texture_tracking,
-            "us": self.model.state.toolbar.analysis.ultrasound_tracking,
-        }
+        # Detection modes are mutually exclusive - each one replaces the edge
+        # detector. The "US" checkbox is a group toggle: ticking it opens a
+        # chooser that sets exactly one of the two ultrasound algorithms.
+        _an = self.model.state.toolbar.analysis
         self._syncing_modes = False
 
-        def _make_mode_guard(name):
-            def _guard(*args):
-                if self._syncing_modes or not _mode_vars[name].get():
-                    return
+        def _clear_us(*_):
+            _an.ultrasound_tracking.set(False)
+            _an.fmd_tracking.set(False)
+
+        def _apply_us_choice(choice):
+            self._syncing_modes = True
+            try:
+                if choice == "fmd":
+                    _an.ultrasound_tracking.set(False)
+                    _an.fmd_tracking.set(True)
+                elif choice == "legacy":
+                    _an.fmd_tracking.set(False)
+                    _an.ultrasound_tracking.set(True)
+                else:  # cancelled - untick the checkbox again
+                    _an.us_enabled.set(False)
+                    _clear_us()
+            finally:
+                self._syncing_modes = False
+
+        def _on_us_toggle(*_):
+            if self._syncing_modes:
+                return
+            if not _an.us_enabled.get():
+                _clear_us()
+                return
+            if _an.texture_tracking.get():
                 self._syncing_modes = True
                 try:
-                    for other, var in _mode_vars.items():
-                        if other != name and var.get():
-                            var.set(False)
+                    _an.texture_tracking.set(False)
                 finally:
                     self._syncing_modes = False
-            return _guard
+            self.ask_ultrasound_mode(
+                _apply_us_choice,
+                fmd=_an.fmd_tracking.get() or not _an.ultrasound_tracking.get(),
+            )
 
-        for _name, _var in _mode_vars.items():
-            _var.trace_add("write", _make_mode_guard(_name))
+        def _on_texture_toggle(*_):
+            if self._syncing_modes:
+                return
+            if _an.texture_tracking.get() and _an.us_enabled.get():
+                self._syncing_modes = True
+                try:
+                    _an.us_enabled.set(False)
+                    _clear_us()
+                finally:
+                    self._syncing_modes = False
+
+        _an.us_enabled.trace_add("write", _on_us_toggle)
+        _an.texture_tracking.trace_add("write", _on_texture_toggle)
 
         self.output_path = None
 
@@ -5576,6 +5607,74 @@ class Controller:
             self.model.to_config().save(override_path=self.model.user_config_path)
         except Exception:
             traceback.print_exc()
+
+    def ask_ultrasound_mode(self, on_choice, fmd=True):
+        """Chooser shown when the 'US' checkbox is ticked. Calls
+        ``on_choice('fmd' | 'legacy' | None)`` when dismissed (None =
+        cancelled). ``fmd`` sets which option is pre-selected. Non-blocking:
+        the work happens in the button callbacks."""
+        popup = tk.Toplevel(root)
+        popup.title("Ultrasound analysis mode")
+        try:
+            popup.iconbitmap(os.path.join(images_folder, "vt_icon.ICO"))
+        except Exception:
+            pass
+        popup.resizable(False, False)
+        popup.transient(root)
+        popup.grab_set()
+
+        frm = tk.Frame(popup)
+        frm.pack(padx=16, pady=14)
+        tk.Label(
+            frm, text="How should ultrasound images be analysed?",
+            font=(default_font, default_font_size, "bold"), justify=tk.LEFT,
+        ).grid(row=0, column=0, columnspan=2, sticky=tk.W, pady=(0, 10))
+
+        choice = tk.StringVar(value="fmd" if fmd else "legacy")
+        tk.Radiobutton(
+            frm, text="Vascular wall tracking (FMD)", value="fmd",
+            variable=choice, font=(default_font, default_font_size),
+        ).grid(row=1, column=0, columnspan=2, sticky=tk.W)
+        tk.Label(
+            frm, text="B-mode wall model. Inner diameter = lumen (intima-intima),\n"
+            "outer = wall-to-wall. Best for artery diameter / FMD studies.",
+            font=(default_font, 9), fg="gray30", justify=tk.LEFT,
+        ).grid(row=2, column=0, columnspan=2, sticky=tk.W, padx=(22, 0), pady=(0, 8))
+        tk.Radiobutton(
+            frm, text="Standard ultrasound (legacy)", value="legacy",
+            variable=choice, font=(default_font, default_font_size),
+        ).grid(row=3, column=0, columnspan=2, sticky=tk.W)
+        tk.Label(
+            frm, text="The original ultrasound edge detector (median filter +\n"
+            "strongest gradient each side).",
+            font=(default_font, 9), fg="gray30", justify=tk.LEFT,
+        ).grid(row=4, column=0, columnspan=2, sticky=tk.W, padx=(22, 0), pady=(0, 10))
+
+        done = {"called": False}
+
+        def _finish(value):
+            if done["called"]:
+                return
+            done["called"] = True
+            try:
+                popup.grab_release()
+                popup.destroy()
+            except Exception:
+                pass
+            on_choice(value)
+
+        btns = tk.Frame(frm)
+        btns.grid(row=5, column=0, columnspan=2, sticky=tk.E)
+        tk.Button(btns, text="Cancel", width=10,
+                  command=lambda: _finish(None)).pack(side=tk.RIGHT, padx=4)
+        tk.Button(btns, text="OK", width=10,
+                  command=lambda: _finish(choice.get())).pack(side=tk.RIGHT)
+        popup.protocol("WM_DELETE_WINDOW", lambda: _finish(None))
+
+        popup.update_idletasks()
+        popup.geometry(
+            "+%d+%d" % (root.winfo_rootx() + 120, root.winfo_rooty() + 120)
+        )
 
     def open_mm_config_dialog(self):
         """Pick the Micro-Manager system configuration for the 'MMConfig'
