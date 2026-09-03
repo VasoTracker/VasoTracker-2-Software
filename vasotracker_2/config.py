@@ -29,6 +29,9 @@ class Configurator:
 
 @dataclass
 class AcquisitionSettings(Configurator):
+    # Empty means the settings file predates camera persistence. In that case,
+    # loading the file must leave the currently selected camera alone.
+    camera: str = ""
     pixel_world_scale: float = 1.0
     exposure: int = 50
     pixel_clock: int = 10
@@ -38,6 +41,8 @@ class AcquisitionSettings(Configurator):
 
     def set_values(self, state: "VtState"):
         acq = state.toolbar.acq
+        if self.camera:
+            acq.camera.set(self.camera)
         acq.scale.set(self.pixel_world_scale)
         acq.exposure.set(self.exposure)
         acq.pixel_clock.set(self.pixel_clock)
@@ -52,6 +57,7 @@ class AcquisitionSettings(Configurator):
         # on every save, churning settings.toml for no reason.
         acq = state.toolbar.acq
         return cls(
+            camera=str(acq.camera.get()),
             pixel_world_scale=float(acq.scale.get()),
             exposure=int(acq.exposure.get()),
             pixel_clock=int(acq.pixel_clock.get()),
@@ -95,6 +101,10 @@ class GraphAxisSettings(Configurator):
     y_max1: float = 250.0
     y_min2: float = 25.0
     y_max2: float = 200.0
+    y_min_p: float = 0.0
+    y_max_p: float = 200.0
+    axis1_metric: str = "Outer diameter"
+    axis2_metric: str = "Inner diameter"
 
     def set_values(self, state: "VtState"):
         g = state.toolbar.graph
@@ -104,6 +114,10 @@ class GraphAxisSettings(Configurator):
         g.y_max_od.set(self.y_max1)
         g.y_min_id.set(self.y_min2)
         g.y_max_id.set(self.y_max2)
+        g.y_min_p.set(self.y_min_p)
+        g.y_max_p.set(self.y_max_p)
+        g.axis1_metric.set(self.axis1_metric)
+        g.axis2_metric.set(self.axis2_metric)
     @classmethod
     def from_state(cls, state: "VtState"):
         g = state.toolbar.graph
@@ -114,6 +128,10 @@ class GraphAxisSettings(Configurator):
             y_max1=float(g.y_max_od.get()),
             y_min2=float(g.y_min_id.get()),
             y_max2=float(g.y_max_id.get()),
+            y_min_p=float(g.y_min_p.get()),
+            y_max_p=float(g.y_max_p.get()),
+            axis1_metric=g.axis1_metric.get(),
+            axis2_metric=g.axis2_metric.get(),
         )
 
 
@@ -154,6 +172,47 @@ class ServoSettings(Configurator):
         return cls(
             device=device,
             ao_channel=ao_channel,
+        )
+
+
+@dataclass
+class PressureHardwareSettings(Configurator):
+    """Persisted pressure backend selection and both backends' connection details."""
+
+    device: str = "NI-DAQ"
+    port: str = "Auto"
+    baud: int = 115200
+    ni_device: str = "Dev1"
+    ni_ao_channel: str = "ao1"
+
+    @staticmethod
+    def normalize_device(name: str) -> str:
+        value = str(name or "").strip().lower()
+        if value in ("arduino", "vasomoto"):
+            return "VasoMoto"
+        return "NI-DAQ"
+
+    def set_values(self, state: "VtState"):
+        hardware = state.toolbar.pressure_device
+        hardware.device_type.set(self.normalize_device(self.device))
+        hardware.port.set(self.port or "Auto")
+        hardware.baud.set(int(self.baud))
+        hardware.ni_device.set(self.ni_device)
+        hardware.ni_ao_channel.set(self.ni_ao_channel)
+
+        # Keep the official servo state in sync for backwards compatibility.
+        state.toolbar.servo.device.set(self.ni_device)
+        state.toolbar.servo.ao_channel.set(self.ni_ao_channel)
+
+    @classmethod
+    def from_state(cls, state: "VtState"):
+        hardware = state.toolbar.pressure_device
+        return cls(
+            device=cls.normalize_device(hardware.device_type.get()),
+            port=hardware.port.get() or "Auto",
+            baud=int(hardware.baud.get()),
+            ni_device=hardware.ni_device.get(),
+            ni_ao_channel=hardware.ni_ao_channel.get(),
         )
 
 
@@ -226,6 +285,7 @@ class Config(Configurator):
     acquisition: AcquisitionSettings = field(default_factory=AcquisitionSettings)
     analysis: AnalysisSettings = field(default_factory=AnalysisSettings)
     servo: ServoSettings = field(default_factory=ServoSettings)
+    pressure: PressureHardwareSettings = field(default_factory=PressureHardwareSettings)
     graph_axes: GraphAxisSettings = field(default_factory=GraphAxisSettings)
     memory: MemorySettings = field(default_factory=MemorySettings)
     pressure_control: PressureControlSettings = field(
@@ -241,9 +301,27 @@ class Config(Configurator):
     @classmethod
     def from_file(cls, path: Union[str, Path]) -> "Config":
         data = toml.load(path)
+        cls._add_pressure_defaults(data)
         result = dacite.from_dict(data_class=cls, data=data)
+        result.pressure.device = PressureHardwareSettings.normalize_device(
+            result.pressure.device
+        )
         result.path = str(path)
         return result
+
+    @staticmethod
+    def _add_pressure_defaults(data: dict) -> None:
+        """Upgrade official/older settings files that only contain [servo]."""
+        if "pressure" in data:
+            return
+        servo = data.get("servo", {}) or {}
+        data["pressure"] = {
+            "device": "NI-DAQ",
+            "port": "Auto",
+            "baud": 115200,
+            "ni_device": servo.get("device", "Dev1"),
+            "ni_ao_channel": servo.get("ao_channel", "ao1"),
+        }
 
     @classmethod
     def load(cls, bundled_path: Union[str, Path],
@@ -269,7 +347,11 @@ class Config(Configurator):
                 _merge(data, toml.load(user_path))
             except Exception:
                 pass
+        cls._add_pressure_defaults(data)
         result = dacite.from_dict(data_class=cls, data=data)
+        result.pressure.device = PressureHardwareSettings.normalize_device(
+            result.pressure.device
+        )
         result.path = str(user_path)
         return result
 

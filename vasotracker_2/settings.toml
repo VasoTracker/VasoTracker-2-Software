@@ -1,4 +1,5 @@
 [acquisition]
+camera = ""
 pixel_world_scale = 1.0
 exposure = 50
 pixel_clock = 10
