@@ -7,6 +7,7 @@ The VasoTracker 2.4 software is a comprehensive software solution designed for t
 
 
 ## Table of Contents
+- [What's New in v2.4.2](#whats-new-in-v242)
 - [What's New in v2.4.1](#whats-new-in-v241)
 - [What's New in v2.4](#whats-new-in-v24)
 - [What's New in v2.3](#whats-new-in-v23)
@@ -17,6 +18,16 @@ The VasoTracker 2.4 software is a comprehensive software solution designed for t
   - [From Source](#option-2-installing-from-source-using-anaconda)
 - [License](#license)
 - [Issues](#issues)
+
+---
+
+## What's New in v2.4.2 (November 2026)
+
+* **Stop/Start no longer loses data.** Stopping with the tracking button used to close the output files, so after Start the table, CSVs and recording stopped saving (and a restart could overwrite the first TIFF). Stop now just flushes to disk; Start carries on in the same experiment. Recorded TIFFs never overwrite an existing file.
+* **Time keeps running across pauses.** Elapsed time no longer restarts at zero after Stop/Start, and the Data Acquisition clock keeps ticking while tracking is paused. Pauses are logged as `stop`/`resume` rows in `_ROIs_log.csv`.
+* **Tracking indicator.** A green **TRACKING** / red **NOT TRACKING** box at the right of the bottom bar.
+* **Safer camera switching.** Switching camera after tracking ends that experiment, so the next one gets its own files instead of overwriting the last; starting a live camera with no output file open asks for one. Stopping a file analysis part-way keeps its results. Loading a file while a camera is running no longer kills acquisition.
+* **Table rows warn if they can't be saved** instead of failing silently.
 
 ---
 
