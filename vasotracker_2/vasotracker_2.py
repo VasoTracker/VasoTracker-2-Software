@@ -1052,6 +1052,9 @@ class Model:
         self._last_record_t = None
         # Whether the _ROIs.png / _ROIs.csv reference has been written this run.
         self._roi_ref_written = False
+        # Stop/resume rows in _ROIs_log.csv (see set_tracking)
+        self._tracked_this_experiment = False
+        self._pending_resume = False
         # Wall-clock of the last fsync of the output files (throttle).
         self._last_fsync_t = 0.0
 
@@ -1091,6 +1094,7 @@ class Model:
         self.table_writer = csv.writer(self.table_file)
         self.table_writer.writerow(self.state.table.headers())
         self.table_file.flush()
+        self._warned_table_unsaved = False
 
         # Per-line diameters, one wide row per recorded frame. Fixed column
         # count so adding/removing an ROI mid-run never reshapes the file; the
@@ -1113,6 +1117,8 @@ class Model:
         )
         self.roi_log_file.flush()
         self._roi_sig = None
+        self._tracked_this_experiment = False
+        self._pending_resume = False
 
         tb = self.state.toolbar
         tb.source.path.set(self.output_dir)
@@ -1286,6 +1292,24 @@ class Model:
         # NOTE(cmo): Set self.tracking directly off the app.tracking variable
         def set_tracking(*args):
             tracking = self.state.app.tracking.get()
+            # Mark pauses in _ROIs_log.csv (live camera only; a loaded file
+            # rewrites its outputs on each run). The first start of an
+            # experiment is logged as "start" by check_roi_change.
+            try:
+                live = (self.state.camera is not None
+                        and self.state.camera.camera_name != "Image from file")
+                if live and bool(tracking) != bool(self.tracking):
+                    if not tracking:
+                        self.log_tracking_event(
+                            "stop",
+                            getattr(self, "_last_tracked_frame", self.frame_count),
+                            self.time_elapsed)
+                    elif self._tracked_this_experiment:
+                        self._pending_resume = True
+                    if tracking:
+                        self._tracked_this_experiment = True
+            except Exception:
+                traceback.print_exc()
             if self.state.camera is not None:
                 if tracking:
                     try:
@@ -1559,6 +1583,11 @@ class Model:
                 self.time_elapsed = self.frames_elapsed
 
             diams = self.state.diameters
+            self._last_tracked_frame = result.frame_id
+            if getattr(self, "_pending_resume", False):
+                # First tracked frame after a Stop -> Start
+                self._pending_resume = False
+                self.log_tracking_event("resume", result.frame_id, self.time_elapsed)
             #print("Length of diameter avg: ", len(diams.avg_outer_diam))
             record_data = self.state.toolbar.start_stop.record.get()
             rec_interval = self.state.toolbar.acq.rec_interval.get()
@@ -1795,17 +1824,34 @@ class Model:
     # Recordings roll over to a new file at self.max_file_size (< 4 GB), so
     # standard TIFF is always sufficient and stays universally readable. The
     # Adobe-Deflate ("zlib") compression we use is understood by ImageJ.
+    def _first_free_tiff_counter(self, start=1):
+        """Lowest counter >= start for which neither the _Raw nor the _Result
+        TIFF exists yet. The writers open in mode 'w', so reusing an existing
+        name would truncate an earlier recording; Raw and Result share one
+        counter so they stay paired."""
+        n = max(1, int(start))
+        stems = [s for s in (self.output_stem1, self.output_stem2,
+                             f"{self.output_stem}_Raw", f"{self.output_stem}_Result")
+                 if s]
+        while any((Path(self.output_dir) / f"{s}_{n:03d}.tiff").exists() for s in stems):
+            n += 1
+        return n
+
     def initialize_tiff_writer1(self):
-        # First file starts at 001
-        self.file_counter1 = 1
+        # First free file number (001 for a new experiment) - never overwrite
+        self.file_counter1 = self._first_free_tiff_counter(
+            self.file_counter2 if self.tiff_writer2 is not None else 1)
         self.output_path1 = Path(self.output_dir) / f"{self.output_stem1}_{self.file_counter1:03d}.tiff"
         print(f"Starting file: {self.output_path1}")
         self.tiff_writer1 = tf.TiffWriter(self.output_path1, mode='w', bigtiff=False)
         self.current_size1 = 0
 
     def initialize_tiff_writer2(self):
-        # First file starts at 001
-        self.file_counter2 = 1
+        # Pair with the Raw file if it is open, else first free number
+        if self.tiff_writer1 is not None and self.file_counter1:
+            self.file_counter2 = self.file_counter1
+        else:
+            self.file_counter2 = self._first_free_tiff_counter(1)
         self.output_path2 = Path(self.output_dir) / f"{self.output_stem2}_{self.file_counter2:03d}.tiff"
         print(f"Starting file: {self.output_path2}")
         self.tiff_writer2 = tf.TiffWriter(self.output_path2, mode='w', bigtiff=False)
@@ -1828,8 +1874,9 @@ class Model:
             if self.tiff_writer2 is not None:
                 self.tiff_writer2.close()
 
-            # Increment shared counter
-            self.file_counter1 += 1
+            # Increment shared counter (skipping any names already on disk)
+            self.file_counter1 = self._first_free_tiff_counter(
+                max(self.file_counter1, self.file_counter2) + 1)
             self.file_counter2 = self.file_counter1  # Keep in sync
 
             # Create new files for both
@@ -2076,6 +2123,22 @@ class Model:
             self.roi_log_file.flush()
         return not first  # first frame isn't a "change"
 
+    def log_tracking_event(self, event, frame, t):
+        """Append a 'stop' / 'resume' row to _ROIs_log.csv so a pause in the
+        recording is marked in the files, not just visible as a time gap."""
+        if self.roi_log_writer is None or self.roi_log_file is None:
+            return
+        try:
+            mode, n = self.roi_mode_and_count(self.state.diameters)
+        except Exception:
+            mode, n = "", ""
+        try:
+            self.roi_log_writer.writerow(
+                [int(frame), round(float(t), 1), event, mode, n, ""])
+            self.roi_log_file.flush()
+        except Exception:
+            traceback.print_exc()
+
     def write_line_row(self, frame, t, diams, roi_changed):
         """One wide row per recorded frame in _lines.csv: per-line OD/ID with a
         fixed column count (NUM_LINES), blanks for lines not currently in use."""
@@ -2140,6 +2203,22 @@ class Model:
                 traceback.print_exc()
 
         else:
+            pass
+
+        # Keep the Data Acquisition clock running while tracking is paused.
+        # The experiment clock (start_time) is not reset on Stop -> Start, so
+        # without this the display froze during a pause and then jumped.
+        # While tracking, the per-frame update in process_images owns it.
+        try:
+            cam = self.state.camera
+            if (not self.tracking and self.start_time
+                    and cam is not None and cam.camera_name != "Image from file"):
+                elapsed = time.time() - self.start_time
+                formatted = time.strftime("%H:%M:%S", time.gmtime(elapsed))
+                if tb.data_acq.time_string.get() != formatted:
+                    tb.data_acq.time.set(np.round(elapsed, 1))
+                    tb.data_acq.time_string.set(formatted)
+        except Exception:
             pass
 
         if _PROFILE_PROCESSING:
@@ -2210,117 +2289,128 @@ class Model:
         """
 
         while self.run_acq_thread:
-            camera = self.state.camera
-            if camera is None:
+            try:
+                self._acq_thread_step()
+            except Exception:
+                # Never let one bad pass (e.g. the camera being swapped
+                # mid-iteration) kill acquisition for the rest of the session.
+                traceback.print_exc()
                 time.sleep(self.sleep_duration)
-                continue
-            file_analysed = self.state.app.file_analysed.get()
-            '''
-            Whenever an image is shown acquiring must be set to true, otherwise an image will not show.
-            Therefore, the logic below cannot rely on acquire == True as this will always be the case when showing an image.
-            '''
-            sleep_duration = self.sleep_duration
-            if self.queue.empty() and self.acquiring and not file_analysed:
-                if self.state.camera.camera_name == "Image from file" and not self.tracking:
-                    '''
-                    Load an image and have it show. The image will not be analysed until the analyse button is pressed and self.tracking is True.
-                    '''
-                    slider_img = camera.get_specific_frame(self.state.cam_show.slider_position_manual)
-                    slider_index = int(self.state.cam_show.slider_position_manual)
-                    self.queue.put(slider_img)
-                    self.queue.empty()
+
+    def _acq_thread_step(self):
+        """One pass of the acquisition loop. Takes a single snapshot of the
+        camera and uses it for every decision, so switching camera on the
+        UI thread mid-pass can't mix one camera's name with another's methods."""
+        camera = self.state.camera
+        if camera is None:
+            time.sleep(self.sleep_duration)
+            return
+        file_analysed = self.state.app.file_analysed.get()
+        '''
+        Whenever an image is shown acquiring must be set to true, otherwise an image will not show.
+        Therefore, the logic below cannot rely on acquire == True as this will always be the case when showing an image.
+        '''
+        sleep_duration = self.sleep_duration
+        if self.queue.empty() and self.acquiring and not file_analysed:
+            if camera.camera_name == "Image from file" and not self.tracking:
+                '''
+                Load an image and have it show. The image will not be analysed until the analyse button is pressed and self.tracking is True.
+                '''
+                slider_img = camera.get_specific_frame(self.state.cam_show.slider_position_manual)
+                slider_index = int(self.state.cam_show.slider_position_manual)
+                self.queue.put(slider_img)
+                self.queue.empty()
+                # NOTE(cmo): Don't spin super fast on the same frame in this state!
+                sleep_duration *= 10
+
+            elif camera.camera_name == "Image from file" and self.tracking and self.tracking_file:
+                '''
+                Analyse the loaded file when the analyse button is pressed.
+                '''
+                camera.next_position(self.state.app.tracking.get())
+                self.state.cam_show.slider_dirty.set(True) # Set the slider to the current potition
+                last_frame = camera.max_frame_count
+                current_frame = camera.frame_count
+
+                # Clear table and graph
+                if current_frame == 1:
+                    self.state.table.clear.set(True)
+                    self.state.graph.clear.set(True)
+
+                # Stop analysis and show graph.
+                if current_frame == last_frame:
+                    self.state.app.acquiring.set(1)
+                    self.state.app.tracking.set(0)
+                    self.state.app.file_analysed.set(1)
+                    camera.reinitialize()
+                    self.frames_elapsed = 0
+
+                    # Update the slider to the current position
+                    self.state.cam_show.slider_toggle_dirty.set(True)
+
+                    # Update the graph
+                    self.state.toolbar.graph.limits_dirty.set(True)
+                    self.state.graph.dirty.set(True)
+
+                    # Enable the slider
+                    self.state.cam_show.slider_change_state.set(True)
+                    
+                # Show the images as we analyse them
+                slider_img = camera.get_specific_frame(self.state.cam_show.slider_position_manual)
+                self.queue.put(slider_img)
+                self.queue.empty()
+
+            else:
+                if camera and camera.image_ready():
+                    # Need to make sure circular buffer has not reset for uManager cameras (crashes if the buffer is 0)
+                    buffer = camera.is_buffer_empty()
+                    # Logic: If not Offline Analyzer and if live camera buffer is empty, then do not try to get an image. Otherwise, get an image.
+                    if not camera.camera_name == "Image from file":
+                        if buffer < 1:
+                            time.sleep(sleep_duration)
+                            return
+                        else:
+                            pass
+                    else:
+                        pass
+                    try:
+                        img = camera.get_image()
+                    except Exception:
+                        img = None  # skip this frame rather than queue a stale/unbound one
+                    if img is not None:
+                        self.queue.put(img)
+                else:
                     # NOTE(cmo): Don't spin super fast on the same frame in this state!
                     sleep_duration *= 10
 
-                elif self.state.camera.camera_name == "Image from file" and self.tracking and self.tracking_file:
-                    '''
-                    Analyse the loaded file when the analyse button is pressed.
-                    '''
-                    camera.next_position(self.state.app.tracking.get())
-                    self.state.cam_show.slider_dirty.set(True) # Set the slider to the current potition
-                    last_frame = self.state.camera.max_frame_count
-                    current_frame = self.state.camera.frame_count
+        elif self.acquiring and self.tracking_file and file_analysed:
+            '''
+            This runs after we have analysed a file and allows us to scroll through the images and plotted graph.
+            '''
+            if camera.camera_name == "Image from file":
+                slider_img = camera.get_specific_frame(self.state.cam_show.slider_position_manual)
+                slider_index = int(self.state.cam_show.slider_position_manual) - 1
 
-                    # Clear table and graph
-                    if current_frame == 1:
-                        self.state.table.clear.set(True)
-                        self.state.graph.clear.set(True)
+                _n = len(self.state.measure.outer_diam)
+                if _n and -_n <= slider_index < _n:
+                    safe_var_set(self.state.toolbar.data_acq.outer_diam, np.round(self.state.measure.outer_diam[slider_index], 1))
+                    safe_var_set(self.state.toolbar.data_acq.inner_diam, np.round(self.state.measure.inner_diam[slider_index], 1))
+                # If no multi ROIs have been drawn then an error is returned as cant set the value. There way be a better way to do this other than try.
+                try:
+                    for i in range(NUM_LINES):
+                        safe_var_set(self.state.toolbar.plotting.outer_diam_values[i], self.state.measure.outer_diam_roi[i][slider_index])
+                        safe_var_set(self.state.toolbar.plotting.inner_diam_values[i], self.state.measure.inner_diam_roi[i][slider_index])
+                except:
+                    pass
+                self.prev_slider_index = slider_index
+                self.queue.put(slider_img)
+                self.queue.empty() #This stops the program from constantly trying to find a new image and analysing it when running from file.
 
-                    # Stop analysis and show graph.
-                    if current_frame == last_frame:
-                        self.state.app.acquiring.set(1)
-                        self.state.app.tracking.set(0)
-                        self.state.app.file_analysed.set(1)
-                        self.state.camera.reinitialize()
-                        self.frames_elapsed = 0
-
-                        # Update the slider to the current position
-                        self.state.cam_show.slider_toggle_dirty.set(True)
-
-                        # Update the graph
-                        self.state.toolbar.graph.limits_dirty.set(True)
-                        self.state.graph.dirty.set(True)
-
-                        # Enable the slider
-                        self.state.cam_show.slider_change_state.set(True)
-                    
-                    # Show the images as we analyse them
-                    slider_img = camera.get_specific_frame(self.state.cam_show.slider_position_manual)
-                    self.queue.put(slider_img)
-                    self.queue.empty()
-
-                else:
-                    camera = self.state.camera
-                    if camera and camera.image_ready():
-                        # Need to make sure circular buffer has not reset for uManager cameras (crashes if the buffer is 0)
-                        buffer = camera.is_buffer_empty()
-                        # Logic: If not Offline Analyzer and if live camera buffer is empty, then do not try to get an image. Otherwise, get an image.
-                        if not self.state.camera.camera_name == "Image from file":
-                            if buffer < 1:
-                                time.sleep(sleep_duration)
-                                continue
-                            else:
-                                pass
-                        else:
-                            pass
-                        try:
-                            img = camera.get_image()
-                        except:
-                            pass
-                        self.queue.put(img)
-                    else:
-                        # NOTE(cmo): Don't spin super fast on the same frame in this state!
-                        sleep_duration *= 10
-
-            elif self.acquiring and self.tracking_file and file_analysed:
-                '''
-                This runs after we have analysed a file and allows us to scroll through the images and plotted graph.
-                '''
-                camera = self.state.camera
-                if self.state.camera.camera_name == "Image from file":
-                    slider_img = camera.get_specific_frame(self.state.cam_show.slider_position_manual)
-                    slider_index = int(self.state.cam_show.slider_position_manual) - 1
-
-                    _n = len(self.state.measure.outer_diam)
-                    if _n and -_n <= slider_index < _n:
-                        safe_var_set(self.state.toolbar.data_acq.outer_diam, np.round(self.state.measure.outer_diam[slider_index], 1))
-                        safe_var_set(self.state.toolbar.data_acq.inner_diam, np.round(self.state.measure.inner_diam[slider_index], 1))
-                    # If no multi ROIs have been drawn then an error is returned as cant set the value. There way be a better way to do this other than try.
-                    try:
-                        for i in range(NUM_LINES):
-                            safe_var_set(self.state.toolbar.plotting.outer_diam_values[i], self.state.measure.outer_diam_roi[i][slider_index])
-                            safe_var_set(self.state.toolbar.plotting.inner_diam_values[i], self.state.measure.inner_diam_roi[i][slider_index])
-                    except:
-                        pass
-                    self.prev_slider_index = slider_index
-                    self.queue.put(slider_img)
-                    self.queue.empty() #This stops the program from constantly trying to find a new image and analysing it when running from file.
-
-                    # NOTE(cmo): Don't spin super fast on the same frame in this state!
-                    sleep_duration *= 2
-            else:
-                pass
-            time.sleep(sleep_duration)
+                # NOTE(cmo): Don't spin super fast on the same frame in this state!
+                sleep_duration *= 2
+        else:
+            pass
+        time.sleep(sleep_duration)
 
     def set_default_graph_lims(self):
         defaults = GraphAxisSettings()
@@ -2653,8 +2743,25 @@ class Model:
             p2,
             temp
         ]
-        self.table_writer.writerow(values)
-        self.table_file.flush()
+        # Write to disk if an output file is open; otherwise still show the row
+        # (never let a closed/missing file swallow it) and warn once.
+        table_file = getattr(self, "table_file", None)
+        saved = False
+        if table_file is not None and not table_file.closed:
+            try:
+                self.table_writer.writerow(values)
+                table_file.flush()
+                saved = True
+            except Exception:
+                traceback.print_exc()
+        if not saved and not getattr(self, "_warned_table_unsaved", False):
+            self._warned_table_unsaved = True
+            tmb.showwarning(
+                "Table row not saved",
+                "This row was added to the table on screen but NOT saved to "
+                "disk, because no output file is open.\n\n"
+                "Use File -> New File to start saving.",
+            )
 
         disp_values = [
             str(self.current_table_row),  # Add row number
@@ -4927,12 +5034,38 @@ class View(ctk.CTkFrame):
         self.graph = GraphFrame(self, state)
         self.table = TableFrame(self, state)
         self.camera = CameraFrame(self, state)
+        # Bottom bar: citation message (stretches) + tracking indicator (right)
+        self.status_frame = tk.Frame(self)
         self.status_bar = tk.Label(
-            self,
+            self.status_frame,
             text="Thank you for using VasoTracker. To support us, please cite the latest VasoTracker release (click here for the paper).",
             relief="sunken",
             anchor="w",
         )
+        self.status_bar.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        # Always-visible tracking state, so it's obvious whether data is
+        # being recorded (the toolbar button icon alone is easy to misread).
+        self.tracking_indicator = tk.Label(
+            self.status_frame,
+            relief="sunken",
+            width=16,
+            fg="white",
+            font=(default_font, default_font_size - 5, "bold"),
+        )
+        self.tracking_indicator.pack(side=tk.RIGHT, fill=tk.Y)
+
+        def _update_tracking_indicator(*_):
+            try:
+                on = bool(state.app.tracking.get())
+            except Exception:
+                on = False
+            self.tracking_indicator.configure(
+                text="TRACKING" if on else "NOT TRACKING",
+                bg="#2e9e44" if on else "#c0392b",
+            )
+
+        state.app.tracking.trace_add("write", _update_tracking_indicator)
+        _update_tracking_indicator()
 
         # Add a link to the status bar along the bottom
         def callback(event):
@@ -4977,7 +5110,7 @@ class View(ctk.CTkFrame):
             padx=2,
             pady=2,
         )
-        self.status_bar.grid(
+        self.status_frame.grid(
             row=3,
             column=0,
             columnspan=3,
@@ -5566,6 +5699,8 @@ class Controller:
             return
 
         print("Camera name:", cam_name)
+        if cam_name != ELLIPSIS:
+            self._end_experiment_for_camera_switch(cam_name)
         self.model.set_camera(cam_name)
 
         # For >8-bit live cameras, let the user see and choose the intensity
@@ -5906,6 +6041,8 @@ class Controller:
                               "The configuration did not load. See console.",
                               parent=popup)
                 return
+            if self._prev_camera != "mmconfig":
+                self._end_experiment_for_camera_switch("mmconfig")
             acq.camera.set("mmconfig")
             self._prev_camera = "mmconfig"
             self._persist_settings()
@@ -6106,7 +6243,15 @@ class Controller:
             '''
             This ensure that when a file is loaded in tracking is set when the button is pressed.
             '''
-            self.setup_files()
+            if not self.model.state.app.tracking.get():
+                # Starting an analysis run: needs an output file (e.g. after a
+                # camera switch closed the last experiment), then (re)opens it
+                # fresh so a re-run replaces the previous run's results.
+                if not self.output_path and not self._start_new_output_file():
+                    return
+                self.setup_files()
+            # (Stopping must NOT call setup_files: that reopens the CSVs in
+            # 'w' mode and would empty the results just computed.)
             if self.model.state.app.tracking.get():
                 # Stopping tracking - close output files
                 self.model.close_tiff_writers()
@@ -6133,6 +6278,22 @@ class Controller:
                     message="You need to select your camera to show images!",
                 )
             else:
+                starting = not self.model.state.app.tracking.get()
+                files_open = getattr(self.model, "output_file", None) is not None
+                if starting and not files_open:
+                    # No open output files (camera switched, a file analysis
+                    # closed them on stop, or none chosen yet). Reopening an
+                    # old path would empty its CSVs, so start a new experiment
+                    # rather than tracking unsaved.
+                    if self.output_path:
+                        tmb.showinfo(
+                            "New output file needed",
+                            "The previous output files are closed, so this "
+                            "recording needs a new output file.\n\n"
+                            "Choose where to save it in the next dialog.",
+                        )
+                    if not self._start_new_output_file():
+                        return
                 if not self.output_path:
                     tmb.showwarning(
                         title="Warning",
@@ -6143,13 +6304,23 @@ class Controller:
 
                     if current_state == 0:
                         self.model.state.app.acquiring.set(not current_state)
-                        current_time = time.time()
-                        self.model.start_time = current_time
+                    # One clock per experiment: start it on the first tracking
+                    # start after File -> New, and never reset it on a later
+                    # Stop -> Start. Times stay monotonic within the files (a
+                    # pause shows up as a gap) instead of jumping back to 0
+                    # mid-file.
+                    if not self.model.start_time:
+                        self.model.start_time = time.time()
                     current_state = self.model.state.app.tracking.get()
                     if current_state:
-                        # Stopping tracking - close output files
-                        self.model.close_tiff_writers()
-                        self.model.close_output_files()
+                        # Stopping tracking - flush (so everything recorded so
+                        # far is on disk and readable) but keep the files OPEN.
+                        # Restarting tracking continues the same experiment;
+                        # nothing here reopens them, so closing on stop used to
+                        # silently drop all later data and table rows, and the
+                        # TIFFs were recreated (overwritten) on the next start.
+                        # Files are closed on File -> New, file load and exit.
+                        self.model._fsync_outputs()
                     self.model.state.app.tracking.set(not current_state)
 
     def start_tracking_file(self):
@@ -6257,13 +6428,60 @@ class Controller:
             self.model.close_tiff_writers()
             self.model.close_output_files()
 
-            self.output_path = None
-            self.output_path = self.get_output_filename()
-            if self.output_path:
-                self.model.setup_output_files(output_path=self.output_path)
+            self._start_new_output_file()
 
-                self.model.state.table.clear.set(True)
-                self.model.state.graph.clear.set(True)
+    def _end_experiment_for_camera_switch(self, new_cam_name):
+        """Switching camera ends the current experiment. Mixing cameras in one
+        set of files gives TIFF pages of different sizes, ROIs in the wrong
+        pixel positions and a stale um/pixel scale, and a file analysis would
+        reuse (and empty) this experiment's CSVs. So close the files cleanly
+        and forget the output path; the next Start asks for a new file.
+
+        Only applies once something has been recorded - choosing the first
+        camera after File -> New keeps that (still empty) experiment."""
+        cam = self.model.state.camera
+        if cam is not None and str(cam.camera_name).lower() == str(new_cam_name).lower():
+            return
+        model = self.model
+        if model.output_file is None and not self.output_path:
+            return
+        if not getattr(model, "_tracked_this_experiment", False):
+            return
+        if model.state.app.tracking.get():
+            model.state.app.tracking.set(False)  # logs the final "stop" row
+        model._fsync_outputs()
+        model.close_tiff_writers()
+        model.close_output_files()
+        model._tracked_this_experiment = False
+        finished = os.path.basename(self.output_path) if self.output_path else ""
+        self.output_path = None
+        print(f"Camera switched: experiment {finished} closed")
+        tmb.showinfo(
+            "Experiment closed",
+            f"Switching camera ends the current experiment"
+            f"{' (' + finished + ')' if finished else ''}. Its files are "
+            "saved and closed.\n\n"
+            "You'll be asked for a new output file when you start tracking.",
+        )
+
+    def _start_new_output_file(self):
+        """Ask for a new output file (next ExpNN) and open it, with a fresh
+        clock, table and graph. Returns True if a file was opened."""
+        self.model.close_tiff_writers()
+        self.model.close_output_files()
+        self.output_path = None
+        self.output_path = self.get_output_filename()
+        if not self.output_path:
+            return False
+        self.model.setup_output_files(output_path=self.output_path)
+        # New experiment -> new clock (started on the first tracking start)
+        self.model.start_time = 0.0
+        self.model.time_elapsed = 0.0
+        self.model._last_record_t = None
+
+        self.model.state.table.clear.set(True)
+        self.model.state.graph.clear.set(True)
+        return True
 
     def menu_load_settings(self):
         settings_filename = filedialog.askopenfilename(
